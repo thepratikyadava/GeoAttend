@@ -1,34 +1,32 @@
-from supabase import create_client, Client
+from supabase import create_client, Client, ClientOptions
 
 from app.config import settings
 
 
-supabase: Client | None = None
+def create_public_client() -> Client:
 
+    if not settings.SUPABASE_URL or not settings.SUPABASE_PUBLISHABLE_KEY:
+        raise RuntimeError("Supabase URL and publishable key must be configured")
 
-def initialize_supabase():
-
-    global supabase
-
-    if not settings.SUPABASE_URL:
-        print("WARNING: Supabase URL is missing")
-        return
-
-    if not settings.SUPABASE_PUBLISHABLE_KEY:
-        print("WARNING: Supabase publishable key is missing")
-        return
-
-    supabase = create_client(
+    return create_client(
         settings.SUPABASE_URL,
         settings.SUPABASE_PUBLISHABLE_KEY
     )
 
-    print("Supabase client initialized")
 
+def create_user_client(access_token: str) -> Client:
 
-def get_supabase():
+    if not settings.SUPABASE_URL or not settings.SUPABASE_PUBLISHABLE_KEY:
+        raise RuntimeError("Supabase URL and publishable key must be configured")
 
-    if supabase is None:
-        raise RuntimeError("Supabase is not configured")
+    options = ClientOptions(
+        headers={
+            "Authorization": f"Bearer {access_token}"
+        }
+    )
 
-    return supabase
+    return create_client(
+        settings.SUPABASE_URL,
+        settings.SUPABASE_PUBLISHABLE_KEY,
+        options=options
+    )

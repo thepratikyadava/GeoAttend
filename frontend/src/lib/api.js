@@ -2,27 +2,45 @@ const API_URL =
   import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 
-export async function checkBackend() {
+export async function apiFetch(path, token, options = {}) {
 
-  const response = await fetch(`${API_URL}/api/health`);
+  const response = await fetch(`${API_URL}${path}`, {
+
+    ...options,
+
+    headers: {
+      "Content-Type": "application/json",
+      ...(token
+        ? { Authorization: `Bearer ${token}` }
+        : {}),
+      ...options.headers
+    }
+
+  });
+
+  const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error("Backend is unavailable");
+
+    throw new Error(
+      data.detail || "Something went wrong"
+    );
+
   }
 
-  return response.json();
+  return data;
+}
+
+
+export async function checkBackend() {
+
+  return apiFetch("/api/health", null);
+
 }
 
 
 export async function checkSupabase() {
 
-  const response = await fetch(
-    `${API_URL}/api/supabase-health`
-  );
+  return apiFetch("/api/supabase-health", null);
 
-  if (!response.ok) {
-    throw new Error("Supabase connection failed");
-  }
-
-  return response.json();
 }

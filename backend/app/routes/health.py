@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
-from app.supabase_client import get_supabase
+
+from app.supabase_client import create_public_client
 
 
 router = APIRouter(
@@ -24,8 +25,11 @@ def health_check():
 @router.get("/supabase-health")
 def supabase_health():
 
+    client = None
+
     try:
-        client = get_supabase()
+
+        client = create_public_client()
 
         response = client.rpc(
             "geoattend_health_check"
@@ -36,9 +40,14 @@ def supabase_health():
             "database_response": response.data
         }
 
-    except Exception as error:
+    except Exception:
 
         raise HTTPException(
             status_code=503,
-            detail=f"Supabase connection check failed: {str(error)}"
+            detail="Supabase connection failed"
         )
+
+    finally:
+
+        if client is not None:
+            client.postgrest.session.close()
