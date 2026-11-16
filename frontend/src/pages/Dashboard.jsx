@@ -29,6 +29,7 @@ export default function Dashboard() {
     profile,
     institution: contextInstitution,
     refreshProfile,
+    switchRole,
     signOut
   } = useAuth();
 
@@ -222,7 +223,16 @@ export default function Dashboard() {
           </div>
 
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
+
+            <button
+              type="button"
+              onClick={() => switchRole(isAdmin ? "student" : "admin")}
+              className="flex items-center gap-1.5 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+            >
+              <ShieldCheck size={14} />
+              Switch to {isAdmin ? "Student" : "Admin"} Role
+            </button>
 
             {profile?.institution_id && (
               <button

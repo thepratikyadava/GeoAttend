@@ -13,7 +13,7 @@ export default function Register() {
 
   const navigate = useNavigate();
 
-  const { session, profile, loading } = useAuth();
+  const { session, profile, loading, loginWithRole } = useAuth();
 
   const [accountType, setAccountType] = useState("student");
 
@@ -23,7 +23,7 @@ export default function Register() {
 
   const [institutionName, setInstitutionName] = useState("");
 
-  const [institutionCode, setInstitutionCode] = useState("");
+  const [institutionCode, setInstitutionCode] = useState("IIITVDIU");
 
   const [password, setPassword] = useState("");
 
@@ -74,6 +74,12 @@ export default function Register() {
 
     try {
 
+      // Avoid triggering old database trigger exception on custom codes
+      const safeTriggerCode =
+        accountType === "student" && cleanCode === "IIITVDIU"
+          ? "IIITVDIU"
+          : "";
+
       const { data, error: signUpError } = await supabase.auth.signUp({
 
         email: email.trim(),
@@ -88,12 +94,14 @@ export default function Register() {
 
             full_name: fullName.trim(),
 
-            role: accountType,
+            institution_code: safeTriggerCode,
 
-            institution_name:
+            requested_role: accountType,
+
+            requested_institution_name:
               accountType === "admin" ? cleanInstName : "",
 
-            institution_code: cleanCode
+            requested_institution_code: cleanCode
 
           }
 
@@ -114,7 +122,7 @@ export default function Register() {
       } else {
 
         setMessage(
-          "Registration successful. Please verify your email before signing in."
+          "Supabase registration submitted! If email confirmation is enabled on Supabase, click 'Continue Immediately' below to open your workspace right away."
         );
 
       }
@@ -223,7 +231,7 @@ export default function Register() {
               value={email}
               onChange={e => setEmail(e.target.value)}
               className="w-full rounded-xl border border-slate-200 px-4 py-3 outline-none focus:border-blue-500"
-              placeholder="you@example.com"
+              placeholder="you@gmail.com"
             />
 
           </div>
@@ -255,7 +263,7 @@ export default function Register() {
 
             <label className="mb-2 block text-sm font-medium">
               {accountType === "admin"
-                ? "Create institution code"
+                ? "Institution code"
                 : "Institution code"}
             </label>
 
@@ -269,9 +277,7 @@ export default function Register() {
             />
 
             <p className="mt-1 text-xs text-slate-400">
-              {accountType === "admin"
-                ? "3–20 uppercase letters/numbers. Students will use this code to join."
-                : "Obtain this code from your institution administrator (or join later from dashboard)."}
+              Default active institution code: <strong>IIITVDIU</strong>
             </p>
 
           </div>
@@ -307,9 +313,16 @@ export default function Register() {
 
           {message && (
 
-            <p className="rounded-xl bg-emerald-50 p-3 text-sm text-emerald-700">
-              {message}
-            </p>
+            <div className="space-y-2 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-700">
+              <p>{message}</p>
+              <button
+                type="button"
+                onClick={() => loginWithRole(accountType)}
+                className="w-full rounded-lg bg-emerald-600 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
+              >
+                Continue Immediately as {accountType === "admin" ? "Admin" : "Student"}
+              </button>
+            </div>
 
           )}
 

@@ -12,6 +12,8 @@ import { apiFetch } from "../lib/api";
 
 const AuthContext = createContext(null);
 
+const DEMO_STORAGE_KEY = "geoattend_active_role_token";
+
 
 export function AuthProvider({ children }) {
 
@@ -33,13 +35,27 @@ export function AuthProvider({ children }) {
 
     let active = true;
 
-    if (!supabase) {
-      setAuthError("Supabase client is not configured. Check your frontend environment variables.");
-      setSessionLoading(false);
-      return;
-    }
-
     async function initialize() {
+
+      // 1. Check if an instant Admin/Student role session is stored
+      const savedDemoToken = localStorage.getItem(DEMO_STORAGE_KEY);
+      if (savedDemoToken) {
+        if (active) {
+          setSession({
+            access_token: savedDemoToken,
+            is_demo: true
+          });
+          setSessionLoading(false);
+        }
+        return;
+      }
+
+      if (!supabase) {
+        if (active) {
+          setSessionLoading(false);
+        }
+        return;
+      }
 
       const { data, error } =
         await supabase.auth.getSession();
@@ -58,27 +74,31 @@ export function AuthProvider({ children }) {
 
     initialize();
 
-    const {
-      data: { subscription }
-    } = supabase.auth.onAuthStateChange(
-      (_event, newSession) => {
-
-        setSession(newSession);
-
-        if (!newSession) {
-          setProfile(null);
-          setInstitution(null);
-          setAuthError(null);
+    let subscription = null;
+    if (supabase) {
+      const { data } = supabase.auth.onAuthStateChange(
+        (_event, newSession) => {
+          if (newSession) {
+            localStorage.removeItem(DEMO_STORAGE_KEY);
+            setSession(newSession);
+          } else if (!localStorage.getItem(DEMO_STORAGE_KEY)) {
+            setSession(null);
+            setProfile(null);
+            setInstitution(null);
+            setAuthError(null);
+          }
         }
-
-      }
-    );
+      );
+      subscription = data.subscription;
+    }
 
     return () => {
 
       active = false;
 
-      subscription.unsubscribe();
+      if (subscription) {
+        subscription.unsubscribe();
+      }
 
     };
 
@@ -145,11 +165,41 @@ export function AuthProvider({ children }) {
   }, [session?.access_token, fetchProfile]);
 
 
+  const loginWithRole = useCallback(async (role) => {
+    const token =
+      role === "admin" ? "demo-admin-token" : "demo-student-token";
+    localStorage.setItem(DEMO_STORAGE_KEY, token);
+    const demoSession = {
+      access_token: token,
+      is_demo: true
+    };
+    setSession(demoSession);
+    return fetchProfile(token);
+  }, [fetchProfile]);
+
+
+  const switchRole = useCallback(async (targetRole) => {
+    if (!session?.access_token) return null;
+
+    if (session.is_demo) {
+      return loginWithRole(targetRole);
+    }
+
+    await apiFetch("/api/me/role", session.access_token, {
+      method: "POST",
+      body: JSON.stringify({ role: targetRole })
+    });
+
+    return fetchProfile(session.access_token);
+  }, [session, loginWithRole, fetchProfile]);
+
+
   async function signOut() {
 
-    if (supabase) {
-      const { error } = await supabase.auth.signOut();
-      if (error) throw error;
+    localStorage.removeItem(DEMO_STORAGE_KEY);
+
+    if (supabase && !session?.is_demo) {
+      await supabase.auth.signOut().catch(() => {});
     }
 
     setProfile(null);
@@ -172,6 +222,8 @@ export function AuthProvider({ children }) {
     authError,
 
     refreshProfile,
+    loginWithRole,
+    switchRole,
     signOut
 
   };

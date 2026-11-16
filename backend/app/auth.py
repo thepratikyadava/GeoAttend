@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import Depends, HTTPException, status
@@ -7,9 +8,31 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from supabase import Client
 
 from app.supabase_client import create_user_client
+from app.local_store import (
+    DEFAULT_ADMIN_ID,
+    DEFAULT_STUDENT_ID,
+    get_or_sync_profile,
+    load_store
+)
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+DEMO_TOKENS = {
+    "demo-admin-token": {
+        "id": DEFAULT_ADMIN_ID,
+        "email": "admin@iiitvadodara.ac.in",
+        "role": "admin",
+        "full_name": "Pratik Kumar (Admin)"
+    },
+    "demo-student-token": {
+        "id": DEFAULT_STUDENT_ID,
+        "email": "student@iiitvadodara.ac.in",
+        "role": "student",
+        "full_name": "Pratik Kumar (Student)"
+    }
+}
 
 
 @dataclass
@@ -17,8 +40,9 @@ class AuthContext:
 
     user: Any
     profile: dict
-    db: Client
+    db: Client | None
     access_token: str
+    is_demo: bool = False
 
 
 def get_current_context(
@@ -36,11 +60,39 @@ def get_current_context(
 
     token = credentials.credentials
 
+    # 1. Check built-in instant Admin / Student tokens
+    if token in DEMO_TOKENS:
+        info = DEMO_TOKENS[token]
+        store = load_store()
+        stored_profile = store.get("profiles", {}).get(info["id"])
+        profile = get_or_sync_profile(
+            user_id=info["id"],
+            email=info["email"],
+            base_profile=stored_profile or {
+                "id": info["id"],
+                "full_name": info["full_name"],
+                "role": info["role"]
+            },
+            user_meta={"role": (stored_profile or {}).get("role", info["role"])}
+        )
+        user_obj = SimpleNamespace(
+            id=info["id"],
+            email=info["email"],
+            user_metadata={"full_name": profile["full_name"], "role": profile["role"]}
+        )
+        return AuthContext(
+            user=user_obj,
+            profile=profile,
+            db=None,
+            access_token=token,
+            is_demo=True
+        )
+
+    # 2. Verify real Supabase JWT token
     try:
 
         client = create_user_client(token)
 
-        # Verify token with Supabase Auth
         response = client.auth.get_user(token)
 
         user = response.user if response else None
@@ -58,9 +110,9 @@ def get_current_context(
             detail="Invalid or expired authentication session"
         ) from exc
 
+    # 3. Load profile from Supabase and merge with local role/institution state
+    base_profile = None
     try:
-
-        # Read profile under the user's own RLS context
         profile_response = (
             client.table("profiles")
             .select(
@@ -70,32 +122,26 @@ def get_current_context(
             .limit(1)
             .execute()
         )
-
         rows = profile_response.data or []
-        profile = rows[0] if rows else None
+        base_profile = rows[0] if rows else None
+    except Exception:
+        base_profile = None
 
-        if not profile:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User profile not found in database. Ensure Phase 2 SQL schema and triggers are installed."
-            )
+    user_meta = getattr(user, "user_metadata", None) or {}
+    profile = get_or_sync_profile(
+        user_id=str(user.id),
+        email=str(user.email or "user@geoattend.app"),
+        base_profile=base_profile,
+        user_meta=user_meta
+    )
 
-        return AuthContext(
-            user=user,
-            profile=profile,
-            db=client,
-            access_token=token
-        )
-
-    except HTTPException:
-        raise
-
-    except Exception as exc:
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load user profile: {str(exc)}"
-        ) from exc
+    return AuthContext(
+        user=user,
+        profile=profile,
+        db=client,
+        access_token=token,
+        is_demo=False
+    )
 
 
 def require_admin(

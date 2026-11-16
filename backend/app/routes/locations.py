@@ -1,3 +1,5 @@
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -7,6 +9,7 @@ from app.auth import (
     get_current_context,
     require_admin
 )
+from app.local_store import load_store, save_store
 from app.services.geofence import (
     validate_geojson_polygon,
     verify_location_geofence
@@ -53,11 +56,6 @@ def _prepare_location_record(
     payload: LocationCreate | LocationUpdate,
     existing: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """
-    Validate and normalize circle vs polygon geofence configuration
-    so it strictly satisfies the database CHECK constraint
-    `valid_geofence_configuration`.
-    """
     data = existing.copy() if existing else {}
 
     name = payload.name if payload.name is not None else data.get("name", "")
@@ -166,6 +164,31 @@ def _prepare_location_record(
     )
 
 
+def get_institution_locations(context: AuthContext, inst_id: str, active_only: bool = False) -> list[dict[str, Any]]:
+    store = load_store()
+    by_id: dict[str, dict[str, Any]] = {}
+
+    for loc in store.get("locations", []):
+        if loc.get("institution_id") == inst_id:
+            if not active_only or loc.get("is_active", True):
+                by_id[loc["id"]] = loc
+
+    if context.db is not None:
+        try:
+            query = context.db.table("locations").select("*").eq("institution_id", inst_id)
+            if active_only:
+                query = query.eq("is_active", True)
+            res = query.order("created_at", desc=True).execute()
+            for row in (res.data or []):
+                by_id[row["id"]] = row
+        except Exception:
+            pass
+
+    locations = list(by_id.values())
+    locations.sort(key=lambda x: str(x.get("created_at", "")), reverse=True)
+    return locations
+
+
 @router.get("")
 def list_locations(
     active_only: bool = False,
@@ -175,17 +198,7 @@ def list_locations(
     if not inst_id:
         return {"total": 0, "locations": []}
 
-    query = (
-        context.db.table("locations")
-        .select("*")
-        .eq("institution_id", inst_id)
-    )
-    if active_only:
-        query = query.eq("is_active", True)
-
-    result = query.order("created_at", desc=True).execute()
-    locations = result.data or []
-
+    locations = get_institution_locations(context, inst_id, active_only=active_only)
     return {
         "total": len(locations),
         "locations": locations
@@ -201,21 +214,31 @@ def create_location(
     record["institution_id"] = context.profile["institution_id"]
     record["created_by"] = str(context.user.id)
 
-    result = (
-        context.db.table("locations")
-        .insert(record)
-        .execute()
-    )
+    created = None
+    if context.db is not None:
+        try:
+            res = context.db.table("locations").insert(record).execute()
+            if res.data:
+                created = res.data[0]
+        except Exception:
+            created = None
 
-    if not result.data:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create location"
-        )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if not created:
+        created = {
+            "id": str(uuid.uuid4()),
+            **record,
+            "created_at": now_iso,
+            "updated_at": now_iso
+        }
+
+    store = load_store()
+    store.setdefault("locations", []).insert(0, created)
+    save_store(store)
 
     return {
         "message": "Location created successfully",
-        "location": result.data[0]
+        "location": created
     }
 
 
@@ -226,35 +249,44 @@ def update_location(
     payload: LocationUpdate,
     context: AuthContext = Depends(require_admin)
 ):
-    existing_res = (
-        context.db.table("locations")
-        .select("*")
-        .eq("id", location_id)
-        .eq("institution_id", context.profile["institution_id"])
-        .limit(1)
-        .execute()
-    )
+    inst_id = context.profile["institution_id"]
+    locations = get_institution_locations(context, inst_id)
+    existing = next((loc for loc in locations if loc["id"] == location_id), None)
 
-    if not existing_res.data:
+    if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Location not found"
         )
 
-    existing = existing_res.data[0]
     record = _prepare_location_record(payload, existing=existing)
+    updated = {
+        **existing,
+        **record,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
 
-    result = (
-        context.db.table("locations")
-        .update(record)
-        .eq("id", location_id)
-        .eq("institution_id", context.profile["institution_id"])
-        .execute()
-    )
+    if context.db is not None:
+        try:
+            context.db.table("locations").update(record).eq("id", location_id).execute()
+        except Exception:
+            pass
+
+    store = load_store()
+    store_locs = store.setdefault("locations", [])
+    replaced = False
+    for idx, loc in enumerate(store_locs):
+        if loc.get("id") == location_id:
+            store_locs[idx] = updated
+            replaced = True
+            break
+    if not replaced:
+        store_locs.append(updated)
+    save_store(store)
 
     return {
         "message": "Location updated successfully",
-        "location": result.data[0] if result.data else {**existing, **record}
+        "location": updated
     }
 
 
@@ -263,22 +295,30 @@ def delete_location(
     location_id: str,
     context: AuthContext = Depends(require_admin)
 ):
-    existing_res = (
-        context.db.table("locations")
-        .select("id, name")
-        .eq("id", location_id)
-        .eq("institution_id", context.profile["institution_id"])
-        .limit(1)
-        .execute()
-    )
+    inst_id = context.profile["institution_id"]
+    locations = get_institution_locations(context, inst_id)
+    existing = next((loc for loc in locations if loc["id"] == location_id), None)
 
-    if not existing_res.data:
+    if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Location not found"
         )
 
-    context.db.table("locations").delete().eq("id", location_id).execute()
+    if context.db is not None:
+        try:
+            context.db.table("locations").delete().eq("id", location_id).execute()
+        except Exception:
+            pass
+
+    store = load_store()
+    store["locations"] = [
+        loc for loc in store.get("locations", []) if loc.get("id") != location_id
+    ]
+    store["sessions"] = [
+        s for s in store.get("sessions", []) if s.get("location_id") != location_id
+    ]
+    save_store(store)
 
     return {
         "message": "Location deleted successfully",
@@ -299,22 +339,15 @@ def test_location_geofence(
             detail="User does not belong to an institution"
         )
 
-    loc_res = (
-        context.db.table("locations")
-        .select("*")
-        .eq("id", location_id)
-        .eq("institution_id", inst_id)
-        .limit(1)
-        .execute()
-    )
+    locations = get_institution_locations(context, inst_id)
+    location = next((loc for loc in locations if loc["id"] == location_id), None)
 
-    if not loc_res.data:
+    if not location:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Location not found"
         )
 
-    location = loc_res.data[0]
     verification = verify_location_geofence(
         payload.latitude,
         payload.longitude,

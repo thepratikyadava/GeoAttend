@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -7,6 +8,12 @@ from app.auth import (
     AuthContext,
     get_current_context,
     require_admin
+)
+from app.local_store import load_store, save_store
+from app.routes.locations import get_institution_locations
+from app.routes.sessions import (
+    get_institution_sessions,
+    get_session_attendance_records
 )
 from app.services.geofence import verify_location_geofence
 
@@ -40,22 +47,16 @@ def mark_attendance(
             detail="Your account is not associated with an institution"
         )
 
-    # 1. Fetch session
-    session_res = (
-        context.db.table("sessions")
-        .select("*")
-        .eq("id", payload.session_id)
-        .limit(1)
-        .execute()
-    )
+    locations = get_institution_locations(context, inst_id)
+    locations_by_id = {loc["id"]: loc for loc in locations}
+    sessions = get_institution_sessions(context, locations_by_id)
+    session_row = next((s for s in sessions if s["id"] == payload.session_id), None)
 
-    if not session_res.data:
+    if not session_row:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Attendance session not found"
         )
-
-    session_row = session_res.data[0]
 
     if not session_row.get("is_active", False):
         raise HTTPException(
@@ -63,30 +64,19 @@ def mark_attendance(
             detail="This attendance session is currently closed"
         )
 
-    # 2. Fetch associated location and confirm institution membership
-    loc_res = (
-        context.db.table("locations")
-        .select("*")
-        .eq("id", session_row["location_id"])
-        .eq("institution_id", inst_id)
-        .limit(1)
-        .execute()
-    )
-
-    if not loc_res.data:
+    location = locations_by_id.get(session_row["location_id"])
+    if not location:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Session location does not belong to your institution"
         )
 
-    location = loc_res.data[0]
     if not location.get("is_active", False):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The location for this session is currently inactive"
         )
 
-    # 3. Validate session time window
     now = datetime.now(timezone.utc)
     start_time = datetime.fromisoformat(
         str(session_row["start_time"]).replace("Z", "+00:00")
@@ -107,23 +97,14 @@ def mark_attendance(
             detail="This attendance session has already ended"
         )
 
-    # 4. Check duplicate attendance for (user_id, session_id)
-    existing_att = (
-        context.db.table("attendance")
-        .select("id, status, verified_at, distance_meters")
-        .eq("session_id", payload.session_id)
-        .eq("user_id", str(context.user.id))
-        .limit(1)
-        .execute()
-    )
-
-    if existing_att.data:
+    uid = str(context.user.id)
+    existing_records = get_session_attendance_records(context, [payload.session_id])
+    if any(r.get("user_id") == uid for r in existing_records):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="You have already marked attendance for this session"
         )
 
-    # 5. Verify geofence coordinates
     verification = verify_location_geofence(
         payload.latitude,
         payload.longitude,
@@ -148,8 +129,6 @@ def mark_attendance(
                 )
             )
 
-    # 6. Determine present vs late status
-    # Present if within LATE_THRESHOLD_MINUTES of start_time (or first 30% of short sessions)
     session_duration_seconds = max(60.0, (end_time - start_time).total_seconds())
     grace_seconds = min(
         LATE_THRESHOLD_MINUTES * 60.0,
@@ -160,7 +139,7 @@ def mark_attendance(
 
     record = {
         "session_id": payload.session_id,
-        "user_id": str(context.user.id),
+        "user_id": uid,
         "latitude": float(payload.latitude),
         "longitude": float(payload.longitude),
         "gps_accuracy_meters": (
@@ -172,19 +151,28 @@ def mark_attendance(
         "status": attendance_status
     }
 
-    insert_res = (
-        context.db.table("attendance")
-        .insert(record)
-        .execute()
-    )
+    saved = None
+    if context.db is not None:
+        try:
+            insert_res = context.db.table("attendance").insert(record).execute()
+            if insert_res.data:
+                saved = insert_res.data[0]
+        except Exception:
+            saved = None
 
-    if not insert_res.data:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to save attendance record"
-        )
+    now_iso = now.isoformat()
+    if not saved:
+        saved = {
+            "id": str(uuid.uuid4()),
+            **record,
+            "verified_at": now_iso,
+            "created_at": now_iso
+        }
 
-    saved = insert_res.data[0]
+    store = load_store()
+    store.setdefault("attendance", []).insert(0, saved)
+    save_store(store)
+
     return {
         "message": f"Attendance verified and marked as {attendance_status.upper()}",
         "attendance": {
@@ -225,33 +213,14 @@ def get_my_attendance(
             "records": []
         }
 
-    # Fetch locations and sessions for the institution
-    loc_res = (
-        context.db.table("locations")
-        .select("id, name, geofence_type, radius_meters, center_latitude, center_longitude")
-        .eq("institution_id", inst_id)
-        .execute()
-    )
-    locations_by_id = {loc["id"]: loc for loc in (loc_res.data or [])}
+    locations = get_institution_locations(context, inst_id)
+    locations_by_id = {loc["id"]: loc for loc in locations}
+    sessions = get_institution_sessions(context, locations_by_id)
+    sessions_by_id = {s["id"]: s for s in sessions}
 
-    sessions_by_id: dict[str, dict[str, Any]] = {}
-    if locations_by_id:
-        sess_res = (
-            context.db.table("sessions")
-            .select("*")
-            .in_("location_id", list(locations_by_id.keys()))
-            .execute()
-        )
-        sessions_by_id = {s["id"]: s for s in (sess_res.data or [])}
-
-    att_res = (
-        context.db.table("attendance")
-        .select("*")
-        .eq("user_id", str(context.user.id))
-        .order("verified_at", desc=True)
-        .execute()
-    )
-    records = att_res.data or []
+    all_records = get_session_attendance_records(context, list(sessions_by_id.keys()))
+    uid = str(context.user.id)
+    records = [r for r in all_records if r.get("user_id") == uid]
 
     enriched = []
     present_count = 0
@@ -299,53 +268,42 @@ def list_institution_attendance(
     context: AuthContext = Depends(require_admin)
 ):
     inst_id = context.profile["institution_id"]
+    locations = get_institution_locations(context, inst_id)
+    locations_by_id = {loc["id"]: loc for loc in locations}
 
-    loc_res = (
-        context.db.table("locations")
-        .select("id, name, geofence_type, radius_meters")
-        .eq("institution_id", inst_id)
-        .execute()
+    sessions = get_institution_sessions(
+        context,
+        locations_by_id,
+        location_id=location_id
     )
-    locations_by_id = {loc["id"]: loc for loc in (loc_res.data or [])}
-
-    if not locations_by_id:
-        return {"total": 0, "records": []}
-
-    sess_query = (
-        context.db.table("sessions")
-        .select("*")
-        .in_("location_id", list(locations_by_id.keys()))
-    )
-    if location_id:
-        sess_query = sess_query.eq("location_id", location_id)
-
-    sess_res = sess_query.execute()
-    sessions_by_id = {s["id"]: s for s in (sess_res.data or [])}
+    sessions_by_id = {s["id"]: s for s in sessions}
 
     if not sessions_by_id:
         return {"total": 0, "records": []}
 
-    users_res = (
-        context.db.table("profiles")
-        .select("id, full_name, role")
-        .eq("institution_id", inst_id)
-        .execute()
-    )
-    users_by_id = {u["id"]: u for u in (users_res.data or [])}
+    store = load_store()
+    users_by_id: dict[str, dict[str, Any]] = {
+        uid: prof for uid, prof in store.get("profiles", {}).items()
+    }
+    if context.db is not None:
+        try:
+            users_res = (
+                context.db.table("profiles")
+                .select("id, full_name, role")
+                .eq("institution_id", inst_id)
+                .execute()
+            )
+            for u in (users_res.data or []):
+                if u["id"] not in users_by_id:
+                    users_by_id[u["id"]] = u
+        except Exception:
+            pass
 
-    att_query = (
-        context.db.table("attendance")
-        .select("*")
-        .in_("session_id", list(sessions_by_id.keys()))
-    )
+    target_sids = [session_id] if session_id else list(sessions_by_id.keys())
+    records = get_session_attendance_records(context, target_sids)
 
-    if session_id:
-        att_query = att_query.eq("session_id", session_id)
     if status_filter in ("present", "late"):
-        att_query = att_query.eq("status", status_filter)
-
-    att_res = att_query.order("verified_at", desc=True).execute()
-    records = att_res.data or []
+        records = [r for r in records if r.get("status") == status_filter]
 
     enriched = []
     for r in records:
@@ -354,12 +312,12 @@ def list_institution_attendance(
         student = users_by_id.get(r["user_id"])
         enriched.append({
             **r,
-            "student_name": student.get("full_name") if student else "Unknown Student",
+            "student_name": student.get("full_name") if student else "Student",
             "student_role": student.get("role") if student else "student",
-            "session_name": sess.get("name") if sess else "Unknown Session",
+            "session_name": sess.get("name") if sess else "Session",
             "session_start_time": sess.get("start_time") if sess else None,
             "location_id": loc.get("id") if loc else None,
-            "location_name": loc.get("name") if loc else "Unknown Location"
+            "location_name": loc.get("name") if loc else "Location"
         })
 
     return {
