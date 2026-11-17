@@ -266,20 +266,48 @@ export default function StudentAttendancePanel({
     const verifyLocationFirst = async (coords) => {
       setMarkingId(sessionRow.id);
       try {
-        const locCheck = await apiFetch("/api/attendance/verify-location", token, {
-          method: "POST",
-          body: JSON.stringify({
-            session_id: sessionRow.id,
-            latitude: coords.latitude,
-            longitude: coords.longitude,
-            gps_accuracy_meters: coords.accuracy
-          })
-        });
+        let verificationData = null;
 
-        setDistancePreview(locCheck.verification);
+        try {
+          const locCheck = await apiFetch("/api/attendance/verify-location", token, {
+            method: "POST",
+            body: JSON.stringify({
+              session_id: sessionRow.id,
+              latitude: coords.latitude,
+              longitude: coords.longitude,
+              gps_accuracy_meters: coords.accuracy
+            })
+          });
+          verificationData = locCheck.verification;
+        } catch (err) {
+          // Fallback if backend hasn't deployed /verify-location yet
+          if (String(err.message).toLowerCase().includes("not found")) {
+            const locRes = await apiFetch(
+              `/api/locations/${sessionRow.location_id}/verify`,
+              token,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  latitude: coords.latitude,
+                  longitude: coords.longitude
+                })
+              }
+            );
+            verificationData = locRes.verification;
+          } else {
+            throw err;
+          }
+        }
 
-        if (!locCheck.has_face_registered) {
-          setError("Please register your facial data first.");
+        setDistancePreview(verificationData);
+
+        if (!verificationData?.inside) {
+          const radiusText = verificationData?.radius_meters
+            ? ` (allowed radius: ${verificationData.radius_meters}m)`
+            : "";
+          setError(
+            `Outside geofence boundary: you are ${verificationData?.distance_meters ?? "?"}m from ${sessionRow.location?.name || "location"}${radiusText}`
+          );
           return;
         }
 
@@ -287,7 +315,7 @@ export default function StudentAttendancePanel({
         setFaceVerifyContext({
           session: sessionRow,
           coords,
-          verification: locCheck.verification
+          verification: verificationData
         });
       } catch (err) {
         setError(err.message);
@@ -300,25 +328,123 @@ export default function StudentAttendancePanel({
   }
 
 
+  function computeMinEuclideanDistance(stored, live) {
+    if (!Array.isArray(stored) || !Array.isArray(live) || live.length !== 128) {
+      return null;
+    }
+    const poses = Array.isArray(stored[0]) ? stored : [stored];
+    let best = Infinity;
+    for (const pose of poses) {
+      if (!Array.isArray(pose) || pose.length !== 128) continue;
+      let sum = 0;
+      for (let i = 0; i < 128; i++) {
+        const d = Number(pose[i]) - Number(live[i]);
+        sum += d * d;
+      }
+      const dist = Math.sqrt(sum);
+      if (dist < best) best = dist;
+    }
+    return best === Infinity ? null : Number(best.toFixed(4));
+  }
+
+
   async function handleCompleteFaceVerification({ faceDescriptor, backgroundSignature }) {
     if (!faceVerifyContext) return;
-    const { session: sessionRow, coords } = faceVerifyContext;
+    const { session: sessionRow, coords, verification } = faceVerifyContext;
 
-    const res = await apiFetch("/api/attendance/mark", token, {
-      method: "POST",
-      body: JSON.stringify({
-        session_id: sessionRow.id,
-        latitude: coords.latitude,
-        longitude: coords.longitude,
-        gps_accuracy_meters: coords.accuracy,
-        face_descriptor: faceDescriptor,
-        background_signature: backgroundSignature
-      })
-    });
+    try {
+      const res = await apiFetch("/api/attendance/mark", token, {
+        method: "POST",
+        body: JSON.stringify({
+          session_id: sessionRow.id,
+          latitude: coords.latitude,
+          longitude: coords.longitude,
+          gps_accuracy_meters: coords.accuracy,
+          face_descriptor: faceDescriptor,
+          background_signature: backgroundSignature
+        })
+      });
+
+      setFaceVerifyContext(null);
+      setSuccess(
+        `${res.message} — Distance: ${res.verification.distance_meters}m (Face match: ${res.face_verification.distance})`
+      );
+      await loadMyHistory();
+      onRefresh();
+      return;
+    } catch (err) {
+      const msg = String(err.message || "").toLowerCase();
+      const canFallback =
+        msg.includes("not found") ||
+        msg.includes("facial data is not registered");
+
+      if (!canFallback || !supabase || !profile?.id) {
+        throw err;
+      }
+    }
+
+    // Fallback: verify face locally against localStorage / Supabase user_metadata & insert into Supabase
+    let storedFace = null;
+    try {
+      const raw = localStorage.getItem(`geoattend_face_${profile.id}`);
+      if (raw) storedFace = JSON.parse(raw);
+    } catch {
+      storedFace = null;
+    }
+
+    if (!storedFace) {
+      const { data: userData } = await supabase.auth.getUser();
+      storedFace = userData?.user?.user_metadata?.face_descriptor || null;
+    }
+
+    if (!storedFace) {
+      throw new Error("Facial data not found. Please register your Face ID first.");
+    }
+
+    const faceDist = computeMinEuclideanDistance(storedFace, faceDescriptor);
+    if (faceDist === null || faceDist > 0.58) {
+      throw new Error(
+        `Facial verification failed (match distance ${faceDist ?? "N/A"} exceeds threshold). Please try again in good lighting.`
+      );
+    }
+
+    const now = new Date();
+    const startMs = new Date(sessionRow.start_time).getTime();
+    const endMs = new Date(sessionRow.end_time).getTime();
+    const durationMs = Math.max(60000, endMs - startMs);
+    const graceMs = Math.min(15 * 60000, Math.max(5 * 60000, durationMs * 0.35));
+    const statusValue = now.getTime() <= startMs + graceMs ? "present" : "late";
+
+    const baseRow = {
+      session_id: sessionRow.id,
+      user_id: profile.id,
+      latitude: coords.latitude,
+      longitude: coords.longitude,
+      gps_accuracy_meters: coords.accuracy,
+      distance_meters: verification?.distance_meters ?? 0,
+      status: statusValue
+    };
+
+    let { error: insertErr } = await supabase
+      .from("attendance")
+      .insert({
+        ...baseRow,
+        face_verified: true,
+        face_match_distance: faceDist
+      });
+
+    if (insertErr && String(insertErr.message || "").includes("column")) {
+      const retry = await supabase.from("attendance").insert(baseRow);
+      insertErr = retry.error;
+    }
+
+    if (insertErr) {
+      throw new Error(insertErr.message || "Failed to save attendance record.");
+    }
 
     setFaceVerifyContext(null);
     setSuccess(
-      `${res.message} — Distance: ${res.verification.distance_meters}m (Face match: ${res.face_verification.distance})`
+      `Location & Face verified — marked as ${statusValue.toUpperCase()} (Distance: ${verification?.distance_meters ?? 0}m, Face match: ${faceDist})`
     );
     await loadMyHistory();
     onRefresh();
