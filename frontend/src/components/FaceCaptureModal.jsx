@@ -33,30 +33,79 @@ const REGISTRATION_POSES = [
   {
     id: "straight",
     title: "Step 1 of 4: Look Straight & Blink",
-    hint: "Face the camera directly and blink naturally."
+    hint: "Look directly at the camera."
   },
   {
     id: "left",
-    title: "Step 2 of 4: Turn Slightly Left",
-    hint: "Turn your head gently to the left."
+    title: "Step 2 of 4: Turn Head Left",
+    hint: "Turn your head slightly to your left."
   },
   {
     id: "right",
-    title: "Step 3 of 4: Turn Slightly Right",
-    hint: "Turn your head gently to the right."
+    title: "Step 3 of 4: Turn Head Right",
+    hint: "Turn your head slightly to your right."
   },
   {
     id: "tilt",
-    title: "Step 4 of 4: Tilt Slightly Up / Down",
-    hint: "Nod slightly up or down while keeping your face visible."
+    title: "Step 4 of 4: Tilt Up or Down",
+    hint: "Tilt your chin slightly up or down."
   }
 ];
 
 
 const DETECTOR_OPTIONS = new faceapi.TinyFaceDetectorOptions({
-  inputSize: 416,
-  scoreThreshold: 0.25
+  inputSize: 320,
+  scoreThreshold: 0.22
 });
+
+
+function avgPoint(points) {
+  const n = points.length || 1;
+  const sum = points.reduce(
+    (acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }),
+    { x: 0, y: 0 }
+  );
+  return { x: sum.x / n, y: sum.y / n };
+}
+
+
+/**
+ * Estimates head orientation ("straight" | "left" | "right" | "tilt")
+ * from 68-point facial landmarks.
+ * Note: Video preview is mirrored (-scale-x-100), so turning to the user's left
+ * shifts the nose tip toward +x in raw camera coordinates.
+ */
+function detectHeadOrientation(landmarks) {
+  const leftEye = avgPoint(landmarks.getLeftEye());
+  const rightEye = avgPoint(landmarks.getRightEye());
+  const nosePts = landmarks.getNose();
+  const noseTip = nosePts[3] || avgPoint(nosePts);
+  const mouth = avgPoint(landmarks.getMouth());
+
+  const eyeMidX = (leftEye.x + rightEye.x) / 2;
+  const eyeMidY = (leftEye.y + rightEye.y) / 2;
+  const eyeDist = Math.max(
+    12,
+    Math.hypot(rightEye.x - leftEye.x, rightEye.y - leftEye.y)
+  );
+  const eyeToMouthY = Math.max(12, mouth.y - eyeMidY);
+
+  const yaw = (noseTip.x - eyeMidX) / eyeDist;
+  const pitch = (noseTip.y - eyeMidY) / eyeToMouthY;
+
+  if (yaw >= 0.14) return "left";
+  if (yaw <= -0.14) return "right";
+  if (pitch <= 0.43 || pitch >= 0.67) return "tilt";
+  return "straight";
+}
+
+
+const POSE_LABELS = {
+  straight: "Looking Straight",
+  left: "Turned Left",
+  right: "Turned Right",
+  tilt: "Tilted Up / Down"
+};
 
 
 export default function FaceCaptureModal({
@@ -71,13 +120,18 @@ export default function FaceCaptureModal({
   const streamRef = useRef(null);
   const busyRef = useRef(false);
   const autoDoneRef = useRef(false);
+  const cooldownUntilRef = useRef(0);
+  const lastValidDescriptorRef = useRef(null);
+  const lastValidBoxRef = useRef(null);
+  const posesRef = useRef([]);
 
   const [modelsReady, setModelsReady] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
   const [faceDetected, setFaceDetected] = useState(false);
+  const [detectedOrientation, setDetectedOrientation] = useState(null);
   const [processing, setProcessing] = useState(false);
   const [poseIndex, setPoseIndex] = useState(0);
-  const [capturedPoses, setCapturedPoses] = useState([]);
+  const [capturedCount, setCapturedCount] = useState(0);
   const [error, setError] = useState("");
 
 
@@ -85,12 +139,17 @@ export default function FaceCaptureModal({
   useEffect(() => {
     if (!isOpen) return;
     setPoseIndex(0);
-    setCapturedPoses([]);
+    setCapturedCount(0);
     setFaceDetected(false);
+    setDetectedOrientation(null);
     setError("");
     setProcessing(false);
     busyRef.current = false;
     autoDoneRef.current = false;
+    cooldownUntilRef.current = 0;
+    lastValidDescriptorRef.current = null;
+    lastValidBoxRef.current = null;
+    posesRef.current = [];
   }, [isOpen, mode]);
 
 
@@ -150,96 +209,179 @@ export default function FaceCaptureModal({
   }, [isOpen]);
 
 
-  // Continuous fast face detection loop + auto-verify in verify mode
+  async function submitFinalRegistration(posesArray) {
+    autoDoneRef.current = true;
+    setProcessing(true);
+    setError("");
+    try {
+      await onCapture(posesArray);
+    } catch (err) {
+      autoDoneRef.current = false;
+      setError(err.message || "Failed to save facial data.");
+    } finally {
+      setProcessing(false);
+    }
+  }
+
+
+  async function submitVerification(descriptorArray, box) {
+    autoDoneRef.current = true;
+    setProcessing(true);
+    setError("");
+    try {
+      const backgroundSignature = extractBackgroundSignatureFromSource(
+        videoRef.current,
+        box
+      );
+      await onCapture({
+        faceDescriptor: descriptorArray,
+        backgroundSignature
+      });
+    } catch (err) {
+      autoDoneRef.current = false;
+      setError(err.message || "Verification failed.");
+    } finally {
+      setProcessing(false);
+    }
+  }
+
+
+  // Continuous landmark + orientation + descriptor loop
   useEffect(() => {
     if (!isOpen || !cameraReady || !modelsReady) return;
 
     let cancelled = false;
-    const intervalId = setInterval(async () => {
-      if (cancelled || busyRef.current || autoDoneRef.current) return;
+
+    const runLoop = async () => {
+      if (cancelled) return;
+
       const video = videoRef.current;
-      if (!video || video.readyState < 2) return;
+      if (
+        video &&
+        video.readyState >= 2 &&
+        !busyRef.current &&
+        !autoDoneRef.current
+      ) {
+        busyRef.current = true;
+        try {
+          const detection = await faceapi
+            .detectSingleFace(video, DETECTOR_OPTIONS)
+            .withFaceLandmarks(true)
+            .withFaceDescriptor();
 
-      try {
-        const det = await faceapi.detectSingleFace(video, DETECTOR_OPTIONS);
-        if (cancelled) return;
-        const found = Boolean(det);
-        setFaceDetected(found);
+          if (!cancelled) {
+            if (detection) {
+              const descriptorArray = Array.from(detection.descriptor).map(
+                (v) => Number(v.toFixed(6))
+              );
+              const orientation = detectHeadOrientation(detection.landmarks);
 
-        // In verify mode, auto-capture as soon as a clear face is seen
-        if (found && mode === "verify" && !autoDoneRef.current) {
-          await captureSingleFrame(true);
+              lastValidDescriptorRef.current = descriptorArray;
+              lastValidBoxRef.current = detection.detection.box;
+              setFaceDetected(true);
+              setDetectedOrientation(orientation);
+
+              if (mode === "verify") {
+                await submitVerification(
+                  descriptorArray,
+                  detection.detection.box
+                );
+              } else if (Date.now() >= cooldownUntilRef.current) {
+                const currentIdx = posesRef.current.length;
+                const expectedPose = REGISTRATION_POSES[currentIdx]?.id;
+
+                if (expectedPose && orientation === expectedPose) {
+                  const nextPoses = [...posesRef.current, descriptorArray];
+                  posesRef.current = nextPoses;
+                  setCapturedCount(nextPoses.length);
+                  cooldownUntilRef.current = Date.now() + 650;
+
+                  if (nextPoses.length < REGISTRATION_POSES.length) {
+                    setPoseIndex(nextPoses.length);
+                  } else {
+                    await submitFinalRegistration(nextPoses);
+                  }
+                }
+              }
+            } else {
+              setFaceDetected(false);
+              setDetectedOrientation(null);
+            }
+          }
+        } catch {
+          // Ignore transient frame errors
+        } finally {
+          busyRef.current = false;
         }
-      } catch {
-        // Ignore transient frame errors
       }
-    }, 250);
+
+      if (!cancelled) {
+        setTimeout(runLoop, 180);
+      }
+    };
+
+    const timerId = setTimeout(runLoop, 180);
 
     return () => {
       cancelled = true;
-      clearInterval(intervalId);
+      clearTimeout(timerId);
     };
-  }, [isOpen, cameraReady, modelsReady, mode, poseIndex]);
+  }, [isOpen, cameraReady, modelsReady, mode]);
 
 
-  async function captureSingleFrame(isAuto = false) {
-    if (!videoRef.current || !modelsReady || !cameraReady || busyRef.current) {
+  async function handleManualCapture() {
+    if (!modelsReady || !cameraReady || processing) return;
+
+    // If all 4 poses were already captured and API save failed, retry saving directly
+    if (
+      mode === "register" &&
+      posesRef.current.length >= REGISTRATION_POSES.length
+    ) {
+      await submitFinalRegistration(posesRef.current);
       return;
     }
 
-    busyRef.current = true;
-    setProcessing(true);
-    if (!isAuto) setError("");
+    setError("");
 
-    try {
-      const video = videoRef.current;
-      const detection = await faceapi
-        .detectSingleFace(video, DETECTOR_OPTIONS)
-        .withFaceLandmarks(true)
-        .withFaceDescriptor();
+    // Use the latest valid descriptor if the live frame is momentarily obscured
+    const cachedDescriptor = lastValidDescriptorRef.current;
+    const cachedBox = lastValidBoxRef.current;
 
-      if (!detection) {
-        if (!isAuto) {
-          setError(
-            "Face not clearly visible. Move closer, face the light, and try again."
-          );
-        }
+    if (mode === "verify") {
+      if (cachedDescriptor && cachedBox) {
+        await submitVerification(cachedDescriptor, cachedBox);
         return;
       }
+      setError("No face detected yet. Look directly at the camera in good lighting.");
+      return;
+    }
 
-      const descriptorArray = Array.from(detection.descriptor).map((v) =>
-        Number(v.toFixed(6))
+    // Registration manual fallback for current pose
+    if (!cachedDescriptor) {
+      setError("No face detected yet. Center your face inside the oval.");
+      return;
+    }
+
+    const expectedPose = REGISTRATION_POSES[posesRef.current.length]?.id;
+    if (
+      detectedOrientation &&
+      expectedPose &&
+      detectedOrientation !== expectedPose
+    ) {
+      setError(
+        `Please ${REGISTRATION_POSES[posesRef.current.length].hint.toLowerCase()} (currently: ${POSE_LABELS[detectedOrientation]}).`
       );
+      return;
+    }
 
-      if (mode === "verify") {
-        autoDoneRef.current = true;
-        const backgroundSignature = extractBackgroundSignatureFromSource(
-          video,
-          detection.detection.box
-        );
-        await onCapture({
-          faceDescriptor: descriptorArray,
-          backgroundSignature
-        });
-        return;
-      }
+    const nextPoses = [...posesRef.current, cachedDescriptor];
+    posesRef.current = nextPoses;
+    setCapturedCount(nextPoses.length);
 
-      // Registration multi-pose collection
-      const nextPoses = [...capturedPoses, descriptorArray];
-      setCapturedPoses(nextPoses);
-
-      if (nextPoses.length < REGISTRATION_POSES.length) {
-        setPoseIndex(nextPoses.length);
-      } else {
-        autoDoneRef.current = true;
-        await onCapture(nextPoses);
-      }
-    } catch (err) {
-      autoDoneRef.current = false;
-      setError(err.message || "Facial capture failed.");
-    } finally {
-      busyRef.current = false;
-      setProcessing(false);
+    if (nextPoses.length < REGISTRATION_POSES.length) {
+      setPoseIndex(nextPoses.length);
+    } else {
+      await submitFinalRegistration(nextPoses);
     }
   }
 
@@ -247,6 +389,11 @@ export default function FaceCaptureModal({
   if (!isOpen) return null;
 
   const currentPose = REGISTRATION_POSES[poseIndex] || REGISTRATION_POSES[0];
+  const expectedPoseId = currentPose.id;
+  const orientationMatched =
+    mode === "register" &&
+    faceDetected &&
+    detectedOrientation === expectedPoseId;
 
   const heading =
     title ||
@@ -258,7 +405,7 @@ export default function FaceCaptureModal({
     subtitle ||
     (mode === "register"
       ? `${currentPose.title} — ${currentPose.hint}`
-      : "Location verified! Blink and look straight at the camera for automatic verification.");
+      : "Location verified! Look straight at the camera for automatic verification.");
 
 
   return (
@@ -299,7 +446,7 @@ export default function FaceCaptureModal({
                 <div
                   key={p.id}
                   className={`h-1.5 rounded-full transition ${
-                    idx < capturedPoses.length
+                    idx < capturedCount
                       ? "bg-emerald-500"
                       : idx === poseIndex
                       ? "bg-blue-600"
@@ -318,13 +465,30 @@ export default function FaceCaptureModal({
               className="h-full w-full -scale-x-100 object-cover"
             />
 
-            {/* Live face detection pill */}
+            {/* Live face + head orientation pill */}
             {cameraReady && (
-              <div className="absolute top-3 left-3 flex items-center gap-1.5 rounded-full bg-slate-900/75 px-3 py-1 text-xs font-semibold text-white">
+              <div className="absolute top-3 left-3 flex items-center gap-1.5 rounded-full bg-slate-900/80 px-3 py-1 text-xs font-semibold text-white">
                 {faceDetected ? (
                   <>
-                    <CheckCircle2 size={14} className="text-emerald-400" />
-                    <span className="text-emerald-300">Face Detected</span>
+                    <CheckCircle2
+                      size={14}
+                      className={
+                        orientationMatched || mode === "verify"
+                          ? "text-emerald-400"
+                          : "text-blue-400"
+                      }
+                    />
+                    <span
+                      className={
+                        orientationMatched || mode === "verify"
+                          ? "text-emerald-300"
+                          : "text-blue-200"
+                      }
+                    >
+                      {detectedOrientation
+                        ? POSE_LABELS[detectedOrientation]
+                        : "Face Detected"}
+                    </span>
                   </>
                 ) : (
                   <>
@@ -341,7 +505,11 @@ export default function FaceCaptureModal({
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
               <div
                 className={`h-48 w-36 rounded-full border-2 border-dashed transition ${
-                  faceDetected ? "border-emerald-400" : "border-blue-400/80"
+                  orientationMatched || (mode === "verify" && faceDetected)
+                    ? "border-emerald-400"
+                    : faceDetected
+                    ? "border-blue-400"
+                    : "border-slate-400/70"
                 }`}
               />
             </div>
@@ -373,14 +541,16 @@ export default function FaceCaptureModal({
             <button
               type="button"
               disabled={!modelsReady || !cameraReady || processing}
-              onClick={() => captureSingleFrame(false)}
+              onClick={handleManualCapture}
               className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-blue-600 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
             >
               <Camera size={16} />
               {processing
-                ? "Verifying..."
+                ? "Saving..."
                 : mode === "register"
-                ? `Capture Pose ${poseIndex + 1}/4`
+                ? capturedCount >= REGISTRATION_POSES.length
+                  ? "Retry Save"
+                  : `Capture Pose ${poseIndex + 1}/4`
                 : "Verify Now"}
             </button>
           </div>
