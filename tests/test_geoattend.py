@@ -11,6 +11,10 @@ from app.services.face import (
     validate_face_descriptor,
     verify_face_descriptor
 )
+from app.services.background import (
+    validate_classroom_samples,
+    verify_classroom_background
+)
 
 
 client = TestClient(app)
@@ -89,20 +93,57 @@ def test_haversine_distance_sanity():
     assert dist == 0.0
 
 
-def test_face_descriptor_validation_and_matching():
+def test_face_descriptor_validation_and_multi_pose_matching():
     vec_a = [0.1] * 128
+    vec_left = [0.2] * 128
     vec_close = [0.11] * 128
-    vec_far = [0.5] * 128
+    vec_far = [0.6] * 128
 
     assert len(validate_face_descriptor(vec_a)) == 128
+    assert len(validate_face_descriptor([vec_a, vec_left])) == 2
 
     with pytest.raises(ValueError):
         validate_face_descriptor([0.1] * 10)
 
-    match_res = verify_face_descriptor(vec_a, vec_close)
+    match_res = verify_face_descriptor([vec_a, vec_left], vec_close)
     assert match_res["matched"] is True
+    assert match_res["poses_checked"] == 2
     assert match_res["distance"] < 0.55
 
-    mismatch_res = verify_face_descriptor(vec_a, vec_far)
+    mismatch_res = verify_face_descriptor([vec_a, vec_left], vec_far)
     assert mismatch_res["matched"] is False
     assert mismatch_res["distance"] > 0.55
+
+
+def test_classroom_background_samples_validation_and_matching():
+    sig_1 = [1.0 if i < 24 else 0.0 for i in range(72)]
+    sig_2 = [0.0 if i < 24 else 1.0 for i in range(72)]
+    sig_3 = [0.5] * 72
+
+    # Fewer than 3 samples must fail
+    with pytest.raises(ValueError):
+        validate_classroom_samples([
+            {"label": "s1", "signature": sig_1},
+            {"label": "s2", "signature": sig_2}
+        ])
+
+    # More than 5 samples must fail
+    with pytest.raises(ValueError):
+        validate_classroom_samples([
+            {"label": f"s{i}", "signature": sig_1} for i in range(6)
+        ])
+
+    valid = validate_classroom_samples([
+        {"label": "Front", "signature": sig_1},
+        {"label": "Back", "signature": sig_2},
+        {"label": "Center", "signature": sig_3}
+    ])
+    assert len(valid) == 3
+
+    match = verify_classroom_background(valid, sig_1)
+    assert match["matched"] is True
+    assert match["similarity"] == 1.0
+
+    mismatch = verify_classroom_background([valid[0]], sig_2)
+    assert mismatch["matched"] is False
+    assert mismatch["similarity"] == 0.0

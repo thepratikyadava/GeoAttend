@@ -20,12 +20,13 @@ INSTITUTION_CODE_PATTERN = re.compile(r"^[A-Z0-9_-]{3,20}$")
 
 class ProfileUpdate(BaseModel):
 
-    full_name: str
+    full_name: str | None = None
+    roll_no: str | None = None
 
 
 class FaceRegistrationPayload(BaseModel):
 
-    face_descriptor: list[float]
+    face_descriptor: list[float] | list[list[float]]
 
 
 class JoinInstitutionPayload(BaseModel):
@@ -120,26 +121,47 @@ def update_my_profile(
     payload: ProfileUpdate,
     context: AuthContext = Depends(get_current_context)
 ):
+    updates: dict[str, str] = {}
 
-    name = payload.full_name.strip()
+    if payload.full_name is not None:
+        name = payload.full_name.strip()
+        if not name or len(name) > 100:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Name must contain between 1 and 100 characters"
+            )
+        updates["full_name"] = name
 
-    if not name or len(name) > 100:
+    if payload.roll_no is not None:
+        roll_no = payload.roll_no.strip().upper()
+        if len(roll_no) > 40:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Roll No. must be at most 40 characters"
+            )
+        updates["roll_no"] = roll_no
+
+    if not updates:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Name must contain between 1 and 100 characters"
+            detail="Provide full_name or roll_no to update"
         )
 
     result = (
         context.db.table("profiles")
-        .update({"full_name": name})
+        .update(updates)
         .eq("id", str(context.user.id))
         .execute()
     )
 
     updated = result.data[0] if result.data else {
         **context.profile,
-        "full_name": name
+        **updates
     }
+    updated["has_face_registered"] = bool(
+        updated.get("face_descriptor") or context.profile.get("face_descriptor")
+    )
+    updated.pop("face_descriptor", None)
 
     return {
         "message": "Profile updated",
@@ -258,7 +280,7 @@ def get_institution_users(
     result = (
         context.db.table("profiles")
         .select(
-            "id, full_name, role, institution_id, created_at, updated_at"
+            "id, full_name, roll_no, role, institution_id, created_at, updated_at"
         )
         .eq(
             "institution_id",

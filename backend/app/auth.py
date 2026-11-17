@@ -64,7 +64,7 @@ def get_current_context(
         profile_response = (
             client.table("profiles")
             .select(
-                "id, full_name, role, institution_id, face_descriptor, face_registered_at, created_at, updated_at"
+                "id, full_name, roll_no, role, institution_id, face_descriptor, face_registered_at, created_at, updated_at"
             )
             .eq("id", str(user.id))
             .limit(1)

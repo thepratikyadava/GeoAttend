@@ -1,16 +1,16 @@
 import { useState, useEffect } from "react";
 import {
-  CalendarCheck,
-  Clock,
   Plus,
   Trash2,
   Power,
-  Users,
   MapPin,
-  Sparkles
+  Sparkles,
+  ImagePlus,
+  X
 } from "lucide-react";
 
 import { apiFetch } from "../lib/api";
+import { extractBackgroundSignatureFromFile } from "../lib/backgroundSignature";
 
 
 function toLocalDatetimeInputValue(dateObj) {
@@ -40,6 +40,7 @@ export default function AdminSessionsPanel({
     const later = new Date(Date.now() + 60 * 60 * 1000);
     return toLocalDatetimeInputValue(later);
   });
+  const [classroomSamples, setClassroomSamples] = useState([]);
 
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [attendanceRecords, setAttendanceRecords] = useState([]);
@@ -93,6 +94,46 @@ export default function AdminSessionsPanel({
   }
 
 
+  async function handleSampleFilesSelected(e) {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setError("");
+
+    if (classroomSamples.length + files.length > 5) {
+      setError("You can attach a maximum of 5 classroom background samples.");
+      e.target.value = "";
+      return;
+    }
+
+    try {
+      const extracted = await Promise.all(
+        files.map(async (file) => {
+          const signature = await extractBackgroundSignatureFromFile(file);
+          return {
+            label: file.name,
+            previewUrl: URL.createObjectURL(file),
+            signature
+          };
+        })
+      );
+      setClassroomSamples((prev) => [...prev, ...extracted]);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      e.target.value = "";
+    }
+  }
+
+
+  function removeSample(index) {
+    setClassroomSamples((prev) => {
+      const target = prev[index];
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((_, i) => i !== index);
+    });
+  }
+
+
   async function handleCreateSession(e) {
     e.preventDefault();
     setError("");
@@ -100,6 +141,14 @@ export default function AdminSessionsPanel({
 
     if (!locationId) {
       setError("Please select an active geofence location first.");
+      return;
+    }
+
+    if (
+      classroomSamples.length > 0 &&
+      (classroomSamples.length < 3 || classroomSamples.length > 5)
+    ) {
+      setError("Please attach between 3 and 5 classroom background sample photos (or 0 to skip).");
       return;
     }
 
@@ -115,10 +164,22 @@ export default function AdminSessionsPanel({
           location_id: locationId,
           start_time: startIso,
           end_time: endIso,
-          is_active: true
+          is_active: true,
+          ...(classroomSamples.length >= 3
+            ? {
+                classroom_samples: classroomSamples.map((s) => ({
+                  label: s.label,
+                  signature: s.signature
+                }))
+              }
+            : {})
         })
       });
 
+      classroomSamples.forEach((s) => {
+        if (s.previewUrl) URL.revokeObjectURL(s.previewUrl);
+      });
+      setClassroomSamples([]);
       setName("");
       setSuccess("Attendance session scheduled and opened.");
       onRefresh();
@@ -270,6 +331,58 @@ export default function AdminSessionsPanel({
                   className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs outline-none focus:border-blue-500"
                 />
               </div>
+            </div>
+
+            {/* Classroom Background Samples (3 to 5 photos) */}
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold text-slate-800">
+                    Classroom Background Samples ({classroomSamples.length}/5)
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Add 3–5 classroom photos to verify student background during check-in.
+                  </p>
+                </div>
+
+                {classroomSamples.length < 5 && (
+                  <label className="flex cursor-pointer items-center gap-1.5 rounded-lg bg-white px-2.5 py-1.5 text-xs font-semibold text-blue-600 border border-blue-200 hover:bg-blue-50">
+                    <ImagePlus size={14} />
+                    Add Photos
+                    <input
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      onChange={handleSampleFilesSelected}
+                      className="hidden"
+                    />
+                  </label>
+                )}
+              </div>
+
+              {classroomSamples.length > 0 && (
+                <div className="mt-3 grid grid-cols-5 gap-2">
+                  {classroomSamples.map((s, idx) => (
+                    <div
+                      key={`${s.label}-${idx}`}
+                      className="relative aspect-square overflow-hidden rounded-lg border border-slate-200 bg-white"
+                    >
+                      <img
+                        src={s.previewUrl}
+                        alt={s.label}
+                        className="h-full w-full object-cover"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeSample(idx)}
+                        className="absolute top-0.5 right-0.5 rounded-full bg-slate-900/75 p-0.5 text-white hover:bg-red-600"
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <button

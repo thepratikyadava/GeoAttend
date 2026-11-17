@@ -10,6 +10,7 @@ from app.auth import (
 )
 from app.services.geofence import verify_location_geofence
 from app.services.face import verify_face_descriptor
+from app.services.background import verify_classroom_background
 
 
 router = APIRouter(
@@ -36,6 +37,7 @@ class AttendanceMarkPayload(BaseModel):
     longitude: float = Field(..., ge=-180.0, le=180.0)
     gps_accuracy_meters: float | None = Field(default=None, ge=0.0)
     face_descriptor: list[float]
+    background_signature: list[float] | None = None
 
 
 def _validate_session_and_location(
@@ -223,6 +225,41 @@ def mark_attendance(
             )
         )
 
+    # Verify classroom background if session has classroom samples configured
+    classroom_samples = session_row.get("classroom_samples") or []
+    background_verified = False
+    background_similarity = None
+    background_result = None
+
+    if len(classroom_samples) >= 3:
+        if not payload.background_signature:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Classroom background verification is required for this session."
+            )
+        try:
+            background_result = verify_classroom_background(
+                classroom_samples,
+                payload.background_signature
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid classroom background signature: {str(exc)}"
+            ) from exc
+
+        if not background_result["matched"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Classroom background did not match session samples "
+                    f"(similarity {background_result['similarity']} < {background_result['threshold']}). "
+                    f"Ensure you are inside the classroom."
+                )
+            )
+        background_verified = True
+        background_similarity = float(background_result["similarity"])
+
     now = datetime.now(timezone.utc)
     session_duration_seconds = max(60.0, (end_time - start_time).total_seconds())
     grace_seconds = min(
@@ -245,7 +282,9 @@ def mark_attendance(
         "distance_meters": float(verification["distance_meters"]),
         "status": attendance_status,
         "face_verified": True,
-        "face_match_distance": float(face_result["distance"])
+        "face_match_distance": float(face_result["distance"]),
+        "background_verified": background_verified,
+        "background_similarity": background_similarity
     }
 
     insert_res = (
@@ -262,7 +301,11 @@ def mark_attendance(
 
     saved = insert_res.data[0]
     return {
-        "message": f"Location & Face verified — marked as {attendance_status.upper()}",
+        "message": (
+            f"Location, Face & Classroom verified — marked as {attendance_status.upper()}"
+            if background_verified
+            else f"Location & Face verified — marked as {attendance_status.upper()}"
+        ),
         "attendance": {
             **saved,
             "session": {
@@ -279,7 +322,8 @@ def mark_attendance(
             }
         },
         "verification": verification,
-        "face_verification": face_result
+        "face_verification": face_result,
+        "background_verification": background_result
     }
 
 

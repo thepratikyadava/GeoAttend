@@ -522,6 +522,7 @@ export default function Dashboard() {
 
                             <tr>
                               <th className="p-4">Name</th>
+                              <th className="p-4">Roll No.</th>
                               <th className="p-4">Role</th>
                               <th className="p-4">Joined</th>
                               <th className="p-4">User ID</th>
@@ -540,6 +541,10 @@ export default function Dashboard() {
 
                                 <td className="p-4 font-medium text-slate-900">
                                   {user.full_name || "Unnamed user"}
+                                </td>
+
+                                <td className="p-4 font-mono text-xs text-slate-600">
+                                  {user.roll_no || "—"}
                                 </td>
 
                                 <td className="p-4">
@@ -572,7 +577,7 @@ export default function Dashboard() {
 
                               <tr>
                                 <td
-                                  colSpan="4"
+                                  colSpan="5"
                                   className="p-6 text-center text-slate-400"
                                 >
                                   No registered users found.

@@ -8,6 +8,7 @@ from app.auth import (
     get_current_context,
     require_admin
 )
+from app.services.background import validate_classroom_samples
 
 
 router = APIRouter(
@@ -23,6 +24,7 @@ class SessionCreate(BaseModel):
     start_time: datetime
     end_time: datetime
     is_active: bool = True
+    classroom_samples: list[dict[str, Any]] | None = None
 
 
 class SessionUpdate(BaseModel):
@@ -31,6 +33,7 @@ class SessionUpdate(BaseModel):
     start_time: datetime | None = None
     end_time: datetime | None = None
     is_active: bool | None = None
+    classroom_samples: list[dict[str, Any]] | None = None
 
 
 def _compute_session_timing_status(session_row: dict[str, Any]) -> str:
@@ -111,12 +114,16 @@ def list_sessions(
     enriched_sessions = []
     for s in sessions:
         sid = s["id"]
+        samples = s.get("classroom_samples") or []
+        session_copy = {k: v for k, v in s.items() if k != "classroom_samples"}
         enriched_sessions.append({
-            **s,
+            **session_copy,
             "location": locations_by_id.get(s["location_id"]),
             "timing_status": _compute_session_timing_status(s),
             "attendance_count": session_counts.get(sid, 0),
-            "my_attendance": my_attendance_by_session.get(sid)
+            "my_attendance": my_attendance_by_session.get(sid),
+            "classroom_samples_count": len(samples),
+            "requires_background_check": len(samples) >= 3
         })
 
     return {
@@ -143,6 +150,16 @@ def create_session(
             detail="Session end_time must be after start_time"
         )
 
+    validated_samples = None
+    if payload.classroom_samples is not None and len(payload.classroom_samples) > 0:
+        try:
+            validated_samples = validate_classroom_samples(payload.classroom_samples)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc)
+            ) from exc
+
     loc_res = (
         context.db.table("locations")
         .select("*")
@@ -160,7 +177,7 @@ def create_session(
 
     location = loc_res.data[0]
 
-    record = {
+    record: dict[str, Any] = {
         "location_id": payload.location_id,
         "name": name,
         "start_time": payload.start_time.astimezone(timezone.utc).isoformat(),
@@ -168,6 +185,8 @@ def create_session(
         "is_active": payload.is_active,
         "created_by": str(context.user.id)
     }
+    if validated_samples is not None:
+        record["classroom_samples"] = validated_samples
 
     result = (
         context.db.table("sessions")
@@ -182,13 +201,16 @@ def create_session(
         )
 
     created = result.data[0]
+    created_copy = {k: v for k, v in created.items() if k != "classroom_samples"}
     return {
         "message": "Attendance session created successfully",
         "session": {
-            **created,
+            **created_copy,
             "location": location,
             "timing_status": _compute_session_timing_status(created),
-            "attendance_count": 0
+            "attendance_count": 0,
+            "classroom_samples_count": len(validated_samples or []),
+            "requires_background_check": bool(validated_samples)
         }
     }
 

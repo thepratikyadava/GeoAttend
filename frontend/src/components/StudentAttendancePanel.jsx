@@ -6,12 +6,14 @@ import {
   Clock,
   AlertCircle,
   Download,
-  ScanFace
+  ScanFace,
+  UserCircle2,
+  Save
 } from "lucide-react";
 
 import { apiFetch } from "../lib/api";
 import GeofenceMap from "./GeofenceMap";
-import FaceCaptureModal from "./FaceCaptureModal";
+import FaceCaptureModal, { preloadFaceModels } from "./FaceCaptureModal";
 
 
 export default function StudentAttendancePanel({
@@ -34,6 +36,10 @@ export default function StudentAttendancePanel({
     records: []
   });
 
+  const [fullNameInput, setFullNameInput] = useState(profile?.full_name || "");
+  const [rollNoInput, setRollNoInput] = useState(profile?.roll_no || "");
+  const [savingProfile, setSavingProfile] = useState(false);
+
   const [userPosition, setUserPosition] = useState(null);
   const [gpsLoading, setGpsLoading] = useState(false);
   const [selectedSession, setSelectedSession] = useState(null);
@@ -48,6 +54,18 @@ export default function StudentAttendancePanel({
 
 
   const hasFaceRegistered = Boolean(profile?.has_face_registered);
+
+
+  // Preload face recognition models in background on mount for instant camera verification
+  useEffect(() => {
+    preloadFaceModels().catch(() => {});
+  }, []);
+
+
+  useEffect(() => {
+    setFullNameInput(profile?.full_name || "");
+    setRollNoInput(profile?.roll_no || "");
+  }, [profile?.full_name, profile?.roll_no]);
 
 
   async function loadMyHistory() {
@@ -72,6 +90,31 @@ export default function StudentAttendancePanel({
       setSelectedSession(ongoing || sessions[0]);
     }
   }, [sessions, selectedSession]);
+
+
+  async function handleSaveProfile(e) {
+    e.preventDefault();
+    setError("");
+    setSuccess("");
+    setSavingProfile(true);
+    try {
+      await apiFetch("/api/me", token, {
+        method: "PATCH",
+        body: JSON.stringify({
+          full_name: fullNameInput.trim(),
+          roll_no: rollNoInput.trim().toUpperCase()
+        })
+      });
+      setSuccess("Profile & Roll No. updated successfully.");
+      if (onRefreshProfile) {
+        await onRefreshProfile();
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingProfile(false);
+    }
+  }
 
 
   function captureStudentGps(callback) {
@@ -137,15 +180,15 @@ export default function StudentAttendancePanel({
   }
 
 
-  async function handleSaveFaceRegistration(descriptor) {
+  async function handleSaveFaceRegistration(descriptorOrPoses) {
     setError("");
     setSuccess("");
     await apiFetch("/api/me/face", token, {
       method: "POST",
-      body: JSON.stringify({ face_descriptor: descriptor })
+      body: JSON.stringify({ face_descriptor: descriptorOrPoses })
     });
     setFaceRegisterModalOpen(false);
-    setSuccess("Facial data registered! You can now verify attendance using your Face ID.");
+    setSuccess("Multi-pose Facial Data registered! You can now mark attendance.");
     if (onRefreshProfile) {
       await onRefreshProfile();
     }
@@ -185,7 +228,7 @@ export default function StudentAttendancePanel({
           return;
         }
 
-        // Step 2: Inside geofence! Now open facial verification modal
+        // Step 2: Inside geofence! Now open facial + background verification modal
         setFaceVerifyContext({
           session: sessionRow,
           coords,
@@ -202,7 +245,7 @@ export default function StudentAttendancePanel({
   }
 
 
-  async function handleCompleteFaceVerification(descriptor) {
+  async function handleCompleteFaceVerification({ faceDescriptor, backgroundSignature }) {
     if (!faceVerifyContext) return;
     const { session: sessionRow, coords } = faceVerifyContext;
 
@@ -213,7 +256,8 @@ export default function StudentAttendancePanel({
         latitude: coords.latitude,
         longitude: coords.longitude,
         gps_accuracy_meters: coords.accuracy,
-        face_descriptor: descriptor
+        face_descriptor: faceDescriptor,
+        background_signature: backgroundSignature
       })
     });
 
@@ -233,6 +277,7 @@ export default function StudentAttendancePanel({
       "Location",
       "Status",
       "Face Verified",
+      "Background Verified",
       "Distance (m)",
       "GPS Accuracy (m)",
       "Latitude",
@@ -244,6 +289,7 @@ export default function StudentAttendancePanel({
       `"${(r.location?.name || "").replace(/"/g, '""')}"`,
       r.status,
       r.face_verified ? "Yes" : "No",
+      r.background_verified ? "Yes" : "No",
       r.distance_meters,
       r.gps_accuracy_meters ?? "",
       r.latitude,
@@ -266,58 +312,105 @@ export default function StudentAttendancePanel({
 
   return (
     <div className="space-y-6">
-      {/* Face ID Registration Banner */}
-      <div
-        className={`flex flex-wrap items-center justify-between gap-4 rounded-2xl border p-5 ${
-          hasFaceRegistered
-            ? "border-emerald-200 bg-emerald-50/70"
-            : "border-amber-200 bg-amber-50"
-        }`}
-      >
-        <div className="flex items-center gap-3.5">
-          <div
-            className={`rounded-xl p-2.5 ${
-              hasFaceRegistered
-                ? "bg-emerald-100 text-emerald-700"
-                : "bg-amber-100 text-amber-700"
-            }`}
-          >
-            <ScanFace size={22} />
+      {/* Top Row: Student Profile (Roll No.) & Face ID Registration */}
+      <div className="grid gap-4 lg:grid-cols-12">
+        <form
+          onSubmit={handleSaveProfile}
+          className="flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200 bg-white p-5 lg:col-span-6"
+        >
+          <div className="flex w-full items-center gap-2 text-sm font-bold text-slate-900">
+            <UserCircle2 className="text-blue-600" size={18} />
+            <span>Student Profile & Roll No.</span>
           </div>
-          <div>
-            <h3
-              className={`text-sm font-bold ${
-                hasFaceRegistered ? "text-emerald-950" : "text-amber-950"
-              }`}
-            >
-              {hasFaceRegistered
-                ? "Face ID Registered & Active"
-                : "Facial Data Not Registered Yet"}
-            </h3>
-            <p
-              className={`text-xs ${
-                hasFaceRegistered ? "text-emerald-700" : "text-amber-800"
-              }`}
-            >
-              {hasFaceRegistered
-                ? "Attendance requires passing both GPS geofence boundary check and live Face ID verification."
-                : "Register your facial data once so GeoAttend can verify your identity after checking your location."}
-            </p>
-          </div>
-        </div>
 
-        <button
-          type="button"
-          onClick={() => setFaceRegisterModalOpen(true)}
-          className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold transition ${
+          <div className="min-w-[160px] flex-1">
+            <label className="mb-1 block text-xs font-semibold uppercase text-slate-400">
+              Full Name
+            </label>
+            <input
+              required
+              maxLength={100}
+              value={fullNameInput}
+              onChange={(e) => setFullNameInput(e.target.value)}
+              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs outline-none focus:border-blue-500"
+            />
+          </div>
+
+          <div className="w-40">
+            <label className="mb-1 block text-xs font-semibold uppercase text-slate-400">
+              Roll No.
+            </label>
+            <input
+              maxLength={40}
+              value={rollNoInput}
+              onChange={(e) => setRollNoInput(e.target.value)}
+              placeholder="e.g. 202651001"
+              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs uppercase outline-none focus:border-blue-500"
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={savingProfile}
+            className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+          >
+            <Save size={14} />
+            {savingProfile ? "Saving..." : "Save"}
+          </button>
+        </form>
+
+        <div
+          className={`flex flex-wrap items-center justify-between gap-4 rounded-2xl border p-5 lg:col-span-6 ${
             hasFaceRegistered
-              ? "border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50"
-              : "bg-amber-600 text-white hover:bg-amber-700"
+              ? "border-emerald-200 bg-emerald-50/70"
+              : "border-amber-200 bg-amber-50"
           }`}
         >
-          <ScanFace size={15} />
-          {hasFaceRegistered ? "Update Face ID" : "Register Face ID"}
-        </button>
+          <div className="flex items-center gap-3.5">
+            <div
+              className={`rounded-xl p-2.5 ${
+                hasFaceRegistered
+                  ? "bg-emerald-100 text-emerald-700"
+                  : "bg-amber-100 text-amber-700"
+              }`}
+            >
+              <ScanFace size={22} />
+            </div>
+            <div>
+              <h3
+                className={`text-sm font-bold ${
+                  hasFaceRegistered ? "text-emerald-950" : "text-amber-950"
+                }`}
+              >
+                {hasFaceRegistered
+                  ? "Face ID Registered & Active"
+                  : "Facial Data Not Registered Yet"}
+              </h3>
+              <p
+                className={`text-xs ${
+                  hasFaceRegistered ? "text-emerald-700" : "text-amber-800"
+                }`}
+              >
+                {hasFaceRegistered
+                  ? "Multi-pose Face ID ready for fast check-in."
+                  : "Register 4 quick poses (blink, left, right, tilt) for fast recognition."}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setFaceRegisterModalOpen(true)}
+            className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold transition ${
+              hasFaceRegistered
+                ? "border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50"
+                : "bg-amber-600 text-white hover:bg-amber-700"
+            }`}
+          >
+            <ScanFace size={15} />
+            {hasFaceRegistered ? "Update Face ID" : "Register Face ID"}
+          </button>
+        </div>
       </div>
 
       {/* Student KPI Summary Cards */}
@@ -394,7 +487,7 @@ export default function StudentAttendancePanel({
                 Attendance Sessions
               </h3>
               <p className="text-xs text-slate-500">
-                Step 1 checks GPS boundary; Step 2 verifies your Face ID.
+                Step 1 checks GPS boundary; Step 2 verifies Face ID & classroom background.
               </p>
             </div>
             <button
@@ -563,7 +656,7 @@ export default function StudentAttendancePanel({
               My Verified Attendance History ({records.length})
             </h3>
             <p className="mt-1 text-xs text-slate-500">
-              Complete log of your geo-tagged and face-verified attendance records.
+              Complete log of your geo-tagged, face-verified, and classroom-verified attendance records.
             </p>
           </div>
 
@@ -585,7 +678,7 @@ export default function StudentAttendancePanel({
                 <th className="p-4">Session</th>
                 <th className="p-4">Location</th>
                 <th className="p-4">Distance</th>
-                <th className="p-4">Face Check</th>
+                <th className="p-4">Verification</th>
                 <th className="p-4">Status</th>
                 <th className="p-4">Verified At</th>
               </tr>
@@ -609,13 +702,18 @@ export default function StudentAttendancePanel({
                     )}
                   </td>
                   <td className="p-4 text-xs">
-                    {r.face_verified ? (
-                      <span className="rounded-full bg-blue-50 px-2.5 py-1 font-semibold text-blue-700">
-                        Face Verified
-                      </span>
-                    ) : (
-                      <span className="text-slate-400">—</span>
-                    )}
+                    <div className="flex flex-wrap gap-1.5">
+                      {r.face_verified && (
+                        <span className="rounded-full bg-blue-50 px-2.5 py-0.5 font-semibold text-blue-700">
+                          Face
+                        </span>
+                      )}
+                      {r.background_verified && (
+                        <span className="rounded-full bg-purple-50 px-2.5 py-0.5 font-semibold text-purple-700">
+                          Classroom
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="p-4">
                     <span
@@ -646,7 +744,7 @@ export default function StudentAttendancePanel({
         </div>
       </div>
 
-      {/* Modal 1: Register / Update Face ID */}
+      {/* Modal 1: Register / Update Multi-Pose Face ID */}
       <FaceCaptureModal
         isOpen={faceRegisterModalOpen}
         mode="register"
@@ -654,13 +752,13 @@ export default function StudentAttendancePanel({
         onCapture={handleSaveFaceRegistration}
       />
 
-      {/* Modal 2: Verify Face after passing Location Check */}
+      {/* Modal 2: Verify Face & Classroom Background after passing Location Check */}
       <FaceCaptureModal
         isOpen={Boolean(faceVerifyContext)}
         mode="verify"
         subtitle={
           faceVerifyContext
-            ? `Location verified (${faceVerifyContext.verification.distance_meters}m from ${faceVerifyContext.session.location?.name}). Scan your face to mark attendance.`
+            ? `Location verified (${faceVerifyContext.verification.distance_meters}m from ${faceVerifyContext.session.location?.name}). Blink & look at the camera for automatic verification.`
             : ""
         }
         onClose={() => setFaceVerifyContext(null)}

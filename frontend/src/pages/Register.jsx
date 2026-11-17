@@ -14,7 +14,7 @@ import {
   CheckCircle2
 } from "lucide-react";
 
-import FaceCaptureModal from "../components/FaceCaptureModal";
+import FaceCaptureModal, { preloadFaceModels } from "../components/FaceCaptureModal";
 
 
 export default function Register() {
@@ -26,6 +26,8 @@ export default function Register() {
   const [accountType, setAccountType] = useState("student");
 
   const [fullName, setFullName] = useState("");
+
+  const [rollNo, setRollNo] = useState("");
 
   const [email, setEmail] = useState("");
 
@@ -44,6 +46,11 @@ export default function Register() {
   const [message, setMessage] = useState("");
 
   const [submitting, setSubmitting] = useState(false);
+
+
+  useEffect(() => {
+    preloadFaceModels().catch(() => {});
+  }, []);
 
 
   useEffect(() => {
@@ -99,6 +106,8 @@ export default function Register() {
           data: {
 
             full_name: fullName.trim(),
+
+            roll_no: accountType === "student" ? rollNo.trim().toUpperCase() : "",
 
             role: accountType,
 
@@ -223,6 +232,27 @@ export default function Register() {
             />
 
           </div>
+
+
+          {accountType === "student" && (
+
+            <div>
+
+              <label className="mb-2 block text-sm font-medium text-slate-700">
+                Roll No.
+              </label>
+
+              <input
+                maxLength={40}
+                value={rollNo}
+                onChange={e => setRollNo(e.target.value)}
+                className="w-full rounded-xl border border-slate-200 px-4 py-3 uppercase outline-none focus:border-blue-500"
+                placeholder="e.g. 202651001"
+              />
+
+            </div>
+
+          )}
 
 
           <div>
