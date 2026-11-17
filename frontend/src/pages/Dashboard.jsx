@@ -15,6 +15,7 @@ import {
 
 import { useAuth } from "../context/AuthContext";
 import { apiFetch } from "../lib/api";
+import { supabase } from "../lib/supabase";
 
 import AdminLocationsPanel from "../components/AdminLocationsPanel";
 import AdminSessionsPanel from "../components/AdminSessionsPanel";
@@ -94,6 +95,53 @@ export default function Dashboard() {
       }
 
     } catch (err) {
+
+      // Fallback to direct Supabase RLS queries if Render is waking up or unreachable
+      if (supabase && profile?.institution_id) {
+        try {
+          const { data: locData } = await supabase
+            .from("locations")
+            .select("*")
+            .eq("institution_id", profile.institution_id)
+            .order("created_at", { ascending: false });
+
+          const locs = locData || [];
+          setLocations(locs);
+
+          if (locs.length > 0) {
+            const locMap = Object.fromEntries(locs.map((l) => [l.id, l]));
+            const { data: sessData } = await supabase
+              .from("sessions")
+              .select("*")
+              .in_("location_id", locs.map((l) => l.id))
+              .order("start_time", { ascending: false });
+
+            const nowMs = Date.now();
+            setSessions(
+              (sessData || []).map((s) => {
+                const startMs = new Date(s.start_time).getTime();
+                const endMs = new Date(s.end_time).getTime();
+                const timing = !s.is_active
+                  ? "closed"
+                  : nowMs < startMs
+                  ? "upcoming"
+                  : nowMs > endMs
+                  ? "ended"
+                  : "ongoing";
+                return {
+                  ...s,
+                  location: locMap[s.location_id] || null,
+                  timing_status: timing
+                };
+              })
+            );
+          }
+          setError("");
+          return;
+        } catch {
+          // Fall through to show original error
+        }
+      }
 
       setError(err.message);
 

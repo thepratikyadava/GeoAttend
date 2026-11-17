@@ -8,7 +8,8 @@ import {
   Download,
   ScanFace,
   UserCircle2,
-  Save
+  Save,
+  Pencil
 } from "lucide-react";
 
 import { apiFetch } from "../lib/api";
@@ -39,6 +40,9 @@ export default function StudentAttendancePanel({
 
   const [fullNameInput, setFullNameInput] = useState(profile?.full_name || "");
   const [rollNoInput, setRollNoInput] = useState(profile?.roll_no || "");
+  const [isEditingProfile, setIsEditingProfile] = useState(
+    !profile?.roll_no
+  );
   const [savingProfile, setSavingProfile] = useState(false);
 
   const [userPosition, setUserPosition] = useState(null);
@@ -70,6 +74,9 @@ export default function StudentAttendancePanel({
   useEffect(() => {
     setFullNameInput(profile?.full_name || "");
     setRollNoInput(profile?.roll_no || "");
+    if (profile?.roll_no) {
+      setIsEditingProfile(false);
+    }
   }, [profile?.full_name, profile?.roll_no]);
 
 
@@ -79,6 +86,50 @@ export default function StudentAttendancePanel({
       const res = await apiFetch("/api/attendance/me", token);
       setMyAttendance(res);
     } catch (err) {
+      // Fallback to direct Supabase RLS query if Render is unreachable
+      if (supabase && profile?.id) {
+        try {
+          const { data: attRows } = await supabase
+            .from("attendance")
+            .select("*")
+            .eq("user_id", profile.id)
+            .order("verified_at", { ascending: false });
+
+          const recordsList = attRows || [];
+          const sessMap = Object.fromEntries(sessions.map((s) => [s.id, s]));
+          const locMap = Object.fromEntries(locations.map((l) => [l.id, l]));
+
+          const enriched = recordsList.map((r) => {
+            const sess = sessMap[r.session_id] || null;
+            const loc = sess ? locMap[sess.location_id] || null : null;
+            return { ...r, session: sess, location: loc };
+          });
+
+          const present = recordsList.filter((r) => r.status === "present").length;
+          const late = recordsList.filter((r) => r.status === "late").length;
+          const totalSessions = sessions.length;
+          const attended = recordsList.length;
+
+          setMyAttendance({
+            total: attended,
+            summary: {
+              total_sessions: totalSessions,
+              attended,
+              present,
+              late,
+              missed: Math.max(0, totalSessions - attended),
+              attendance_rate:
+                totalSessions > 0
+                  ? Number(((attended / totalSessions) * 100).toFixed(1))
+                  : 0
+            },
+            records: enriched
+          });
+          return;
+        } catch {
+          // Fall through to setError
+        }
+      }
       setError(err.message);
     }
   }
@@ -101,18 +152,51 @@ export default function StudentAttendancePanel({
     e.preventDefault();
     setError("");
     setSuccess("");
+
+    const cleanName = fullNameInput.trim();
+    const cleanRoll = rollNoInput.trim().toUpperCase();
+
+    if (!cleanName) {
+      setError("Full name is required.");
+      return;
+    }
+
     setSavingProfile(true);
     try {
-      await apiFetch("/api/me", token, {
-        method: "PATCH",
-        body: JSON.stringify({
-          full_name: fullNameInput.trim(),
-          roll_no: rollNoInput.trim().toUpperCase()
-        })
-      });
-      setSuccess("Profile & Roll No. updated successfully.");
+      let savedViaBackend = false;
+      try {
+        await apiFetch("/api/me", token, {
+          method: "PATCH",
+          body: JSON.stringify({
+            full_name: cleanName,
+            roll_no: cleanRoll
+          })
+        });
+        savedViaBackend = true;
+      } catch {
+        savedViaBackend = false;
+      }
+
+      // Also persist immediately in Supabase directly
+      if (supabase && profile?.id) {
+        await supabase
+          .from("profiles")
+          .update({ full_name: cleanName, roll_no: cleanRoll })
+          .eq("id", profile.id);
+
+        await supabase.auth.updateUser({
+          data: { full_name: cleanName, roll_no: cleanRoll }
+        });
+      } else if (!savedViaBackend) {
+        throw new Error("Unable to save profile right now.");
+      }
+
+      if (cleanRoll) {
+        setIsEditingProfile(false);
+      }
+      setSuccess("Profile & Roll No. saved to Supabase.");
       if (onRefreshProfile) {
-        await onRefreshProfile();
+        await onRefreshProfile().catch(() => {});
       }
     } catch (err) {
       setError(err.message);
@@ -495,50 +579,101 @@ export default function StudentAttendancePanel({
     <div className="space-y-6">
       {/* Top Row: Student Profile (Roll No.) & Face ID Registration */}
       <div className="grid gap-4 lg:grid-cols-12">
-        <form
-          onSubmit={handleSaveProfile}
-          className="flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200 bg-white p-5 lg:col-span-6"
-        >
-          <div className="flex w-full items-center gap-2 text-sm font-bold text-slate-900">
-            <UserCircle2 className="text-blue-600" size={18} />
-            <span>Student Profile & Roll No.</span>
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 lg:col-span-6">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
+              <UserCircle2 className="text-blue-600" size={18} />
+              <span>Student Profile & Roll No.</span>
+            </div>
+
+            {!isEditingProfile && (
+              <button
+                type="button"
+                onClick={() => setIsEditingProfile(true)}
+                className="flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                <Pencil size={12} />
+                Edit
+              </button>
+            )}
           </div>
 
-          <div className="min-w-[160px] flex-1">
-            <label className="mb-1 block text-xs font-semibold uppercase text-slate-400">
-              Full Name
-            </label>
-            <input
-              required
-              maxLength={100}
-              value={fullNameInput}
-              onChange={(e) => setFullNameInput(e.target.value)}
-              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs outline-none focus:border-blue-500"
-            />
-          </div>
+          {!isEditingProfile ? (
+            <div className="mt-3 flex flex-wrap items-center gap-6">
+              <div>
+                <p className="text-xs font-semibold uppercase text-slate-400">
+                  Full Name
+                </p>
+                <p className="mt-0.5 text-sm font-semibold text-slate-900">
+                  {fullNameInput || profile?.full_name || "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs font-semibold uppercase text-slate-400">
+                  Roll No.
+                </p>
+                <p className="mt-0.5 font-mono text-sm font-bold text-blue-700">
+                  {rollNoInput || profile?.roll_no || "—"}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <form
+              onSubmit={handleSaveProfile}
+              className="mt-3 flex flex-wrap items-end gap-3"
+            >
+              <div className="min-w-[150px] flex-1">
+                <label className="mb-1 block text-xs font-semibold uppercase text-slate-400">
+                  Full Name
+                </label>
+                <input
+                  required
+                  maxLength={100}
+                  value={fullNameInput}
+                  onChange={(e) => setFullNameInput(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs outline-none focus:border-blue-500"
+                />
+              </div>
 
-          <div className="w-40">
-            <label className="mb-1 block text-xs font-semibold uppercase text-slate-400">
-              Roll No.
-            </label>
-            <input
-              maxLength={40}
-              value={rollNoInput}
-              onChange={(e) => setRollNoInput(e.target.value)}
-              placeholder="e.g. 202651001"
-              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs uppercase outline-none focus:border-blue-500"
-            />
-          </div>
+              <div className="w-40">
+                <label className="mb-1 block text-xs font-semibold uppercase text-slate-400">
+                  Roll No.
+                </label>
+                <input
+                  required
+                  maxLength={40}
+                  value={rollNoInput}
+                  onChange={(e) => setRollNoInput(e.target.value)}
+                  placeholder="e.g. 202651001"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs uppercase outline-none focus:border-blue-500"
+                />
+              </div>
 
-          <button
-            type="submit"
-            disabled={savingProfile}
-            className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
-          >
-            <Save size={14} />
-            {savingProfile ? "Saving..." : "Save"}
-          </button>
-        </form>
+              <button
+                type="submit"
+                disabled={savingProfile}
+                className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+              >
+                <Save size={14} />
+                {savingProfile ? "Saving..." : "Save"}
+              </button>
+
+              {profile?.roll_no && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFullNameInput(profile?.full_name || "");
+                    setRollNoInput(profile?.roll_no || "");
+                    setIsEditingProfile(false);
+                  }}
+                  className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+              )}
+            </form>
+          )}
+        </div>
 
         <div
           className={`flex flex-wrap items-center justify-between gap-4 rounded-2xl border p-5 lg:col-span-6 ${
