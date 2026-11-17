@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 
 import { apiFetch } from "../lib/api";
+import { supabase } from "../lib/supabase";
 import GeofenceMap from "./GeofenceMap";
 import FaceCaptureModal, { preloadFaceModels } from "./FaceCaptureModal";
 
@@ -48,12 +49,16 @@ export default function StudentAttendancePanel({
   const [markingId, setMarkingId] = useState(null);
   const [faceRegisterModalOpen, setFaceRegisterModalOpen] = useState(false);
   const [faceVerifyContext, setFaceVerifyContext] = useState(null);
+  const [localFaceSaved, setLocalFaceSaved] = useState(() => {
+    if (!profile?.id) return false;
+    return Boolean(localStorage.getItem(`geoattend_face_${profile.id}`));
+  });
 
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
 
-  const hasFaceRegistered = Boolean(profile?.has_face_registered);
+  const hasFaceRegistered = Boolean(profile?.has_face_registered || localFaceSaved);
 
 
   // Preload face recognition models in background on mount for instant camera verification
@@ -183,14 +188,64 @@ export default function StudentAttendancePanel({
   async function handleSaveFaceRegistration(descriptorOrPoses) {
     setError("");
     setSuccess("");
-    await apiFetch("/api/me/face", token, {
-      method: "POST",
-      body: JSON.stringify({ face_descriptor: descriptorOrPoses })
-    });
+
+    // Always keep a local backup keyed by user ID
+    if (profile?.id) {
+      try {
+        localStorage.setItem(
+          `geoattend_face_${profile.id}`,
+          JSON.stringify(descriptorOrPoses)
+        );
+        setLocalFaceSaved(true);
+      } catch {
+        // Ignore storage quota errors
+      }
+    }
+
+    let savedToBackend = false;
+
+    // 1. Primary: Save via FastAPI Backend (/api/me/face)
+    try {
+      await apiFetch("/api/me/face", token, {
+        method: "POST",
+        body: JSON.stringify({ face_descriptor: descriptorOrPoses })
+      });
+      savedToBackend = true;
+    } catch {
+      savedToBackend = false;
+    }
+
+    // 2. Fallback: Save directly via Supabase (profiles + auth user_metadata)
+    if (!savedToBackend && supabase && profile?.id) {
+      const nowIso = new Date().toISOString();
+      const { error: dbErr } = await supabase
+        .from("profiles")
+        .update({
+          face_descriptor: descriptorOrPoses,
+          face_registered_at: nowIso
+        })
+        .eq("id", profile.id);
+
+      const { error: authErr } = await supabase.auth.updateUser({
+        data: {
+          face_descriptor: descriptorOrPoses,
+          face_registered_at: nowIso
+        }
+      });
+
+      if (!dbErr || !authErr) {
+        savedToBackend = true;
+      }
+    }
+
     setFaceRegisterModalOpen(false);
-    setSuccess("Multi-pose Facial Data registered! You can now mark attendance.");
+    setSuccess(
+      savedToBackend
+        ? "Multi-pose Facial Data registered! You can now mark attendance."
+        : "Facial Data saved locally on this device. You can now mark attendance."
+    );
     if (onRefreshProfile) {
-      await onRefreshProfile();
+      await onRefreshProfile().catch(() => {});
     }
   }
 

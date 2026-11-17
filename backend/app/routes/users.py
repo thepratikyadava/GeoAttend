@@ -61,9 +61,15 @@ def get_my_profile(
         except Exception:
             institution = None
 
+    user_meta = getattr(context.user, "user_metadata", None) or {}
+    has_face = bool(
+        context.profile.get("face_descriptor")
+        or user_meta.get("face_descriptor")
+    )
+
     profile_data = {
         **context.profile,
-        "has_face_registered": bool(context.profile.get("face_descriptor"))
+        "has_face_registered": has_face
     }
     profile_data.pop("face_descriptor", None)
 

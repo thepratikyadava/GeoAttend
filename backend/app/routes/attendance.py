@@ -172,7 +172,11 @@ def verify_attendance_location(
         context
     )
 
-    has_face = bool(context.profile.get("face_descriptor"))
+    user_meta = getattr(context.user, "user_metadata", None) or {}
+    has_face = bool(
+        context.profile.get("face_descriptor")
+        or user_meta.get("face_descriptor")
+    )
 
     return {
         "inside": True,
@@ -198,7 +202,11 @@ def mark_attendance(
         _validate_session_and_location(payload, context)
     )
 
-    stored_face = context.profile.get("face_descriptor")
+    user_meta = getattr(context.user, "user_metadata", None) or {}
+    stored_face = (
+        context.profile.get("face_descriptor")
+        or user_meta.get("face_descriptor")
+    )
     if not stored_face:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
