@@ -6,12 +6,6 @@ from app.auth import (
     AuthContext,
     require_admin
 )
-from app.local_store import load_store
-from app.routes.locations import get_institution_locations
-from app.routes.sessions import (
-    get_institution_sessions,
-    get_session_attendance_records
-)
 
 
 router = APIRouter(
@@ -26,58 +20,58 @@ def get_analytics_overview(
 ):
     inst_id = context.profile["institution_id"]
 
-    # 1. Institution users
-    store = load_store()
-    users_by_id: dict[str, dict[str, Any]] = {}
-    for uid, prof in store.get("profiles", {}).items():
-        if prof.get("institution_id") == inst_id:
-            users_by_id[uid] = prof
-
-    if context.db is not None:
-        try:
-            users_res = (
-                context.db.table("profiles")
-                .select("id, full_name, role, created_at")
-                .eq("institution_id", inst_id)
-                .execute()
-            )
-            for u in (users_res.data or []):
-                if u["id"] not in users_by_id:
-                    users_by_id[u["id"]] = u
-        except Exception:
-            pass
-
-    all_users = list(users_by_id.values())
+    users_res = (
+        context.db.table("profiles")
+        .select("id, full_name, role, created_at")
+        .eq("institution_id", inst_id)
+        .execute()
+    )
+    all_users = users_res.data or []
     students = [u for u in all_users if u.get("role") == "student"]
     total_students = len(students)
 
-    # 2. Locations
-    locations = get_institution_locations(context, inst_id)
+    loc_res = (
+        context.db.table("locations")
+        .select("*")
+        .eq("institution_id", inst_id)
+        .execute()
+    )
+    locations = loc_res.data or []
     locations_by_id = {loc["id"]: loc for loc in locations}
 
-    # 3. Sessions
-    sessions = get_institution_sessions(context, locations_by_id)
-    sessions.sort(key=lambda x: str(x.get("start_time", "")))
+    sessions: list[dict[str, Any]] = []
+    if locations_by_id:
+        sess_res = (
+            context.db.table("sessions")
+            .select("*")
+            .in_("location_id", list(locations_by_id.keys()))
+            .order("start_time", desc=False)
+            .execute()
+        )
+        sessions = sess_res.data or []
     sessions_by_id = {s["id"]: s for s in sessions}
 
-    # 4. Attendance records
-    attendance_records = get_session_attendance_records(
-        context,
-        list(sessions_by_id.keys())
-    )
+    attendance_records: list[dict[str, Any]] = []
+    if sessions_by_id:
+        att_res = (
+            context.db.table("attendance")
+            .select("*")
+            .in_("session_id", list(sessions_by_id.keys()))
+            .execute()
+        )
+        attendance_records = att_res.data or []
 
     present_count = sum(1 for a in attendance_records if a.get("status") == "present")
     late_count = sum(1 for a in attendance_records if a.get("status") == "late")
     total_records = len(attendance_records)
 
-    total_possible = max(1, total_students) * len(sessions)
+    total_possible = total_students * len(sessions)
     overall_attendance_rate = (
         round((total_records / total_possible) * 100.0, 1)
-        if total_possible > 0 and len(sessions) > 0
+        if total_possible > 0
         else 0.0
     )
 
-    # 5. Per-session breakdown
     att_by_session: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for a in attendance_records:
         att_by_session[a["session_id"]].append(a)
@@ -108,7 +102,6 @@ def get_analytics_overview(
             "attendance_rate": s_rate
         })
 
-    # 6. Per-location breakdown
     sessions_by_location: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for s in sessions:
         sessions_by_location[s["location_id"]].append(s)
@@ -127,7 +120,6 @@ def get_analytics_overview(
             "attendance_count": loc_att_count
         })
 
-    # 7. Student attendance report table
     att_by_student: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for a in attendance_records:
         att_by_student[a["user_id"]].append(a)
@@ -159,7 +151,6 @@ def get_analytics_overview(
 
     student_reports.sort(key=lambda x: x["attendance_rate"], reverse=True)
 
-    # 8. Daily trend aggregation
     daily_map: dict[str, dict[str, int]] = defaultdict(
         lambda: {"present": 0, "late": 0, "total": 0}
     )

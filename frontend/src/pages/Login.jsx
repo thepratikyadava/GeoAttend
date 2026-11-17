@@ -6,14 +6,14 @@ import { supabase } from "../lib/supabase";
 
 import { useAuth } from "../context/AuthContext";
 
-import { Navigation, ShieldCheck, UserCheck } from "lucide-react";
+import { Navigation } from "lucide-react";
 
 
 export default function Login() {
 
   const navigate = useNavigate();
 
-  const { session, profile, loading, loginWithRole } = useAuth();
+  const { session, profile, loading } = useAuth();
 
 
   const [email, setEmail] = useState("");
@@ -46,31 +46,20 @@ export default function Login() {
     event.preventDefault();
 
     setError("");
+
+    if (!supabase) {
+      setError("Supabase client is not configured.");
+      return;
+    }
+
     setSubmitting(true);
 
-    const normalizedEmail = email.trim().toLowerCase();
-
     try {
-
-      // Support built-in Admin & Student credentials directly
-      if (normalizedEmail === "admin@iiitvadodara.ac.in") {
-        await loginWithRole("admin");
-        return;
-      }
-
-      if (normalizedEmail === "student@iiitvadodara.ac.in") {
-        await loginWithRole("student");
-        return;
-      }
-
-      if (!supabase) {
-        throw new Error("Supabase client is not configured.");
-      }
 
       const { error: signInError } =
         await supabase.auth.signInWithPassword({
 
-          email: normalizedEmail,
+          email: email.trim(),
           password
 
         });
@@ -90,34 +79,21 @@ export default function Login() {
   }
 
 
-  async function handleQuickRoleLogin(role) {
-    setError("");
-    setSubmitting(true);
-    try {
-      await loginWithRole(role);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-
   return (
 
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-5 py-10">
 
       <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
 
-        <div className="mb-7 text-center">
+        <div className="mb-8 text-center">
 
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-600 text-white">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-xs">
 
             <Navigation size={28} />
 
           </div>
 
-          <h1 className="text-2xl font-bold">
+          <h1 className="text-2xl font-bold text-slate-900">
             Welcome to GeoAttend
           </h1>
 
@@ -130,12 +106,12 @@ export default function Login() {
 
         <form
           onSubmit={handleLogin}
-          className="space-y-4"
+          className="space-y-5"
         >
 
           <div>
 
-            <label className="mb-2 block text-sm font-medium">
+            <label className="mb-2 block text-sm font-medium text-slate-700">
               Email address
             </label>
 
@@ -145,7 +121,7 @@ export default function Login() {
               value={email}
               onChange={e => setEmail(e.target.value)}
               className="w-full rounded-xl border border-slate-200 px-4 py-3 outline-none focus:border-blue-500"
-              placeholder="admin@iiitvadodara.ac.in"
+              placeholder="you@example.com"
             />
 
           </div>
@@ -153,7 +129,7 @@ export default function Login() {
 
           <div>
 
-            <label className="mb-2 block text-sm font-medium">
+            <label className="mb-2 block text-sm font-medium text-slate-700">
               Password
             </label>
 
@@ -190,46 +166,13 @@ export default function Login() {
         </form>
 
 
-        <div className="mt-6 border-t border-slate-100 pt-5">
-
-          <p className="mb-3 text-center text-xs font-semibold uppercase tracking-wider text-slate-400">
-            Instant Role Access (IIITVDIU)
-          </p>
-
-          <div className="grid grid-cols-2 gap-2.5">
-
-            <button
-              type="button"
-              disabled={submitting}
-              onClick={() => handleQuickRoleLogin("admin")}
-              className="flex items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 py-2.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50"
-            >
-              <ShieldCheck size={15} />
-              Run as Admin
-            </button>
-
-            <button
-              type="button"
-              disabled={submitting}
-              onClick={() => handleQuickRoleLogin("student")}
-              className="flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 py-2.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
-            >
-              <UserCheck size={15} />
-              Run as Student
-            </button>
-
-          </div>
-
-        </div>
-
-
         <p className="mt-6 text-center text-sm text-slate-500">
 
           Don't have an account?{" "}
 
           <Link
             to="/register"
-            className="font-semibold text-blue-600"
+            className="font-semibold text-blue-600 hover:underline"
           >
             Register
           </Link>
