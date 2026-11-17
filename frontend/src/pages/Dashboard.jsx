@@ -632,9 +632,11 @@ export default function Dashboard() {
               /* Student Portal View */
               <StudentAttendancePanel
                 token={session.access_token}
+                profile={profile}
                 locations={locations}
                 sessions={sessions}
                 onRefresh={loadDashboardData}
+                onRefreshProfile={refreshProfile}
               />
 
             )}

@@ -23,6 +23,11 @@ class ProfileUpdate(BaseModel):
     full_name: str
 
 
+class FaceRegistrationPayload(BaseModel):
+
+    face_descriptor: list[float]
+
+
 class JoinInstitutionPayload(BaseModel):
 
     institution_code: str
@@ -55,13 +60,58 @@ def get_my_profile(
         except Exception:
             institution = None
 
+    profile_data = {
+        **context.profile,
+        "has_face_registered": bool(context.profile.get("face_descriptor"))
+    }
+    profile_data.pop("face_descriptor", None)
+
     return {
         "user": {
             "id": str(context.user.id),
             "email": context.user.email
         },
-        "profile": context.profile,
+        "profile": profile_data,
         "institution": institution
+    }
+
+
+@router.post("/me/face")
+def register_my_face(
+    payload: FaceRegistrationPayload,
+    context: AuthContext = Depends(get_current_context)
+):
+    from datetime import datetime, timezone
+    from app.services.face import validate_face_descriptor
+
+    try:
+        normalized = validate_face_descriptor(payload.face_descriptor)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc)
+        ) from exc
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    result = (
+        context.db.table("profiles")
+        .update({
+            "face_descriptor": normalized,
+            "face_registered_at": now_iso
+        })
+        .eq("id", str(context.user.id))
+        .execute()
+    )
+
+    if not result.data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save facial data. Ensure database/phase6_face.sql has been run."
+        )
+
+    return {
+        "message": "Facial data registered successfully",
+        "face_registered_at": now_iso
     }
 
 

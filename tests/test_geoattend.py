@@ -7,6 +7,10 @@ from app.services.geofence import (
     haversine_distance_meters,
     verify_location_geofence
 )
+from app.services.face import (
+    validate_face_descriptor,
+    verify_face_descriptor
+)
 
 
 client = TestClient(app)
@@ -83,3 +87,22 @@ def test_polygon_geofence_verification():
 def test_haversine_distance_sanity():
     dist = haversine_distance_meters(20.7197, 70.9398, 20.7197, 70.9398)
     assert dist == 0.0
+
+
+def test_face_descriptor_validation_and_matching():
+    vec_a = [0.1] * 128
+    vec_close = [0.11] * 128
+    vec_far = [0.5] * 128
+
+    assert len(validate_face_descriptor(vec_a)) == 128
+
+    with pytest.raises(ValueError):
+        validate_face_descriptor([0.1] * 10)
+
+    match_res = verify_face_descriptor(vec_a, vec_close)
+    assert match_res["matched"] is True
+    assert match_res["distance"] < 0.55
+
+    mismatch_res = verify_face_descriptor(vec_a, vec_far)
+    assert mismatch_res["matched"] is False
+    assert mismatch_res["distance"] > 0.55

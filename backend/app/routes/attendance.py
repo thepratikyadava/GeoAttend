@@ -9,6 +9,7 @@ from app.auth import (
     require_admin
 )
 from app.services.geofence import verify_location_geofence
+from app.services.face import verify_face_descriptor
 
 
 router = APIRouter(
@@ -20,7 +21,7 @@ router = APIRouter(
 LATE_THRESHOLD_MINUTES = 15
 
 
-class AttendanceMarkPayload(BaseModel):
+class LocationPrecheckPayload(BaseModel):
 
     session_id: str
     latitude: float = Field(..., ge=-90.0, le=90.0)
@@ -28,11 +29,19 @@ class AttendanceMarkPayload(BaseModel):
     gps_accuracy_meters: float | None = Field(default=None, ge=0.0)
 
 
-@router.post("/mark", status_code=status.HTTP_201_CREATED)
-def mark_attendance(
-    payload: AttendanceMarkPayload,
-    context: AuthContext = Depends(get_current_context)
-):
+class AttendanceMarkPayload(BaseModel):
+
+    session_id: str
+    latitude: float = Field(..., ge=-90.0, le=90.0)
+    longitude: float = Field(..., ge=-180.0, le=180.0)
+    gps_accuracy_meters: float | None = Field(default=None, ge=0.0)
+    face_descriptor: list[float]
+
+
+def _validate_session_and_location(
+    payload: LocationPrecheckPayload | AttendanceMarkPayload,
+    context: AuthContext
+) -> tuple[dict[str, Any], dict[str, Any], datetime, datetime, dict[str, Any]]:
     inst_id = context.profile.get("institution_id")
     if not inst_id:
         raise HTTPException(
@@ -143,6 +152,78 @@ def mark_attendance(
                 )
             )
 
+    return session_row, location, start_time, end_time, verification
+
+
+@router.post("/verify-location")
+def verify_attendance_location(
+    payload: LocationPrecheckPayload,
+    context: AuthContext = Depends(get_current_context)
+):
+    """
+    Step 1 of attendance check-in:
+    Verify session window and confirm the student is inside the geofence boundary
+    before launching facial verification.
+    """
+    session_row, location, _, _, verification = _validate_session_and_location(
+        payload,
+        context
+    )
+
+    has_face = bool(context.profile.get("face_descriptor"))
+
+    return {
+        "inside": True,
+        "has_face_registered": has_face,
+        "session_id": session_row["id"],
+        "location_name": location["name"],
+        "verification": verification
+    }
+
+
+@router.post("/mark", status_code=status.HTTP_201_CREATED)
+def mark_attendance(
+    payload: AttendanceMarkPayload,
+    context: AuthContext = Depends(get_current_context)
+):
+    """
+    Step 2 of attendance check-in:
+    1. Re-verify session window & geofence boundary.
+    2. Verify live facial descriptor against the user's registered facial record.
+    3. Record verified attendance.
+    """
+    session_row, location, start_time, end_time, verification = (
+        _validate_session_and_location(payload, context)
+    )
+
+    stored_face = context.profile.get("face_descriptor")
+    if not stored_face:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Facial data is not registered on your profile. Please register your Face ID first."
+        )
+
+    try:
+        face_result = verify_face_descriptor(
+            stored_face,
+            payload.face_descriptor
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid facial capture data: {str(exc)}"
+        ) from exc
+
+    if not face_result["matched"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Facial verification failed (match distance {face_result['distance']} "
+                f"exceeds threshold {face_result['threshold']}). Please try again in good lighting."
+            )
+        )
+
+    now = datetime.now(timezone.utc)
     session_duration_seconds = max(60.0, (end_time - start_time).total_seconds())
     grace_seconds = min(
         LATE_THRESHOLD_MINUTES * 60.0,
@@ -162,7 +243,9 @@ def mark_attendance(
             else None
         ),
         "distance_meters": float(verification["distance_meters"]),
-        "status": attendance_status
+        "status": attendance_status,
+        "face_verified": True,
+        "face_match_distance": float(face_result["distance"])
     }
 
     insert_res = (
@@ -179,7 +262,7 @@ def mark_attendance(
 
     saved = insert_res.data[0]
     return {
-        "message": f"Attendance verified and marked as {attendance_status.upper()}",
+        "message": f"Location & Face verified — marked as {attendance_status.upper()}",
         "attendance": {
             **saved,
             "session": {
@@ -195,7 +278,8 @@ def mark_attendance(
                 "radius_meters": location.get("radius_meters")
             }
         },
-        "verification": verification
+        "verification": verification,
+        "face_verification": face_result
     }
 
 

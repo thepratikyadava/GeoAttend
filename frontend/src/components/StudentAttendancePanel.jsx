@@ -4,20 +4,23 @@ import {
   LocateFixed,
   CheckCircle2,
   Clock,
-  ShieldCheck,
   AlertCircle,
-  Download
+  Download,
+  ScanFace
 } from "lucide-react";
 
 import { apiFetch } from "../lib/api";
 import GeofenceMap from "./GeofenceMap";
+import FaceCaptureModal from "./FaceCaptureModal";
 
 
 export default function StudentAttendancePanel({
   token,
+  profile,
   locations,
   sessions,
-  onRefresh
+  onRefresh,
+  onRefreshProfile
 }) {
   const [myAttendance, setMyAttendance] = useState({
     summary: {
@@ -37,8 +40,14 @@ export default function StudentAttendancePanel({
   const [distancePreview, setDistancePreview] = useState(null);
 
   const [markingId, setMarkingId] = useState(null);
+  const [faceRegisterModalOpen, setFaceRegisterModalOpen] = useState(false);
+  const [faceVerifyContext, setFaceVerifyContext] = useState(null);
+
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+
+
+  const hasFaceRegistered = Boolean(profile?.has_face_registered);
 
 
   async function loadMyHistory() {
@@ -128,15 +137,38 @@ export default function StudentAttendancePanel({
   }
 
 
+  async function handleSaveFaceRegistration(descriptor) {
+    setError("");
+    setSuccess("");
+    await apiFetch("/api/me/face", token, {
+      method: "POST",
+      body: JSON.stringify({ face_descriptor: descriptor })
+    });
+    setFaceRegisterModalOpen(false);
+    setSuccess("Facial data registered! You can now verify attendance using your Face ID.");
+    if (onRefreshProfile) {
+      await onRefreshProfile();
+    }
+  }
+
+
   async function handleMarkAttendance(sessionRow) {
     setError("");
     setSuccess("");
     setSelectedSession(sessionRow);
 
-    const submitAttendance = async (coords) => {
+    if (!hasFaceRegistered) {
+      setError(
+        "Please register your facial data first using the 'Register Face ID' button above before marking attendance."
+      );
+      return;
+    }
+
+    // Step 1: Acquire GPS and verify location boundary FIRST
+    const verifyLocationFirst = async (coords) => {
       setMarkingId(sessionRow.id);
       try {
-        const res = await apiFetch("/api/attendance/mark", token, {
+        const locCheck = await apiFetch("/api/attendance/verify-location", token, {
           method: "POST",
           body: JSON.stringify({
             session_id: sessionRow.id,
@@ -146,11 +178,19 @@ export default function StudentAttendancePanel({
           })
         });
 
-        setSuccess(
-          `${res.message} — Distance: ${res.verification.distance_meters}m`
-        );
-        await loadMyHistory();
-        onRefresh();
+        setDistancePreview(locCheck.verification);
+
+        if (!locCheck.has_face_registered) {
+          setError("Please register your facial data first.");
+          return;
+        }
+
+        // Step 2: Inside geofence! Now open facial verification modal
+        setFaceVerifyContext({
+          session: sessionRow,
+          coords,
+          verification: locCheck.verification
+        });
       } catch (err) {
         setError(err.message);
       } finally {
@@ -158,7 +198,31 @@ export default function StudentAttendancePanel({
       }
     };
 
-    captureStudentGps(submitAttendance);
+    captureStudentGps(verifyLocationFirst);
+  }
+
+
+  async function handleCompleteFaceVerification(descriptor) {
+    if (!faceVerifyContext) return;
+    const { session: sessionRow, coords } = faceVerifyContext;
+
+    const res = await apiFetch("/api/attendance/mark", token, {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: sessionRow.id,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        gps_accuracy_meters: coords.accuracy,
+        face_descriptor: descriptor
+      })
+    });
+
+    setFaceVerifyContext(null);
+    setSuccess(
+      `${res.message} — Distance: ${res.verification.distance_meters}m (Face match: ${res.face_verification.distance})`
+    );
+    await loadMyHistory();
+    onRefresh();
   }
 
 
@@ -168,6 +232,7 @@ export default function StudentAttendancePanel({
       "Session",
       "Location",
       "Status",
+      "Face Verified",
       "Distance (m)",
       "GPS Accuracy (m)",
       "Latitude",
@@ -178,6 +243,7 @@ export default function StudentAttendancePanel({
       `"${(r.session?.name || "").replace(/"/g, '""')}"`,
       `"${(r.location?.name || "").replace(/"/g, '""')}"`,
       r.status,
+      r.face_verified ? "Yes" : "No",
       r.distance_meters,
       r.gps_accuracy_meters ?? "",
       r.latitude,
@@ -200,6 +266,60 @@ export default function StudentAttendancePanel({
 
   return (
     <div className="space-y-6">
+      {/* Face ID Registration Banner */}
+      <div
+        className={`flex flex-wrap items-center justify-between gap-4 rounded-2xl border p-5 ${
+          hasFaceRegistered
+            ? "border-emerald-200 bg-emerald-50/70"
+            : "border-amber-200 bg-amber-50"
+        }`}
+      >
+        <div className="flex items-center gap-3.5">
+          <div
+            className={`rounded-xl p-2.5 ${
+              hasFaceRegistered
+                ? "bg-emerald-100 text-emerald-700"
+                : "bg-amber-100 text-amber-700"
+            }`}
+          >
+            <ScanFace size={22} />
+          </div>
+          <div>
+            <h3
+              className={`text-sm font-bold ${
+                hasFaceRegistered ? "text-emerald-950" : "text-amber-950"
+              }`}
+            >
+              {hasFaceRegistered
+                ? "Face ID Registered & Active"
+                : "Facial Data Not Registered Yet"}
+            </h3>
+            <p
+              className={`text-xs ${
+                hasFaceRegistered ? "text-emerald-700" : "text-amber-800"
+              }`}
+            >
+              {hasFaceRegistered
+                ? "Attendance requires passing both GPS geofence boundary check and live Face ID verification."
+                : "Register your facial data once so GeoAttend can verify your identity after checking your location."}
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setFaceRegisterModalOpen(true)}
+          className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold transition ${
+            hasFaceRegistered
+              ? "border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50"
+              : "bg-amber-600 text-white hover:bg-amber-700"
+          }`}
+        >
+          <ScanFace size={15} />
+          {hasFaceRegistered ? "Update Face ID" : "Register Face ID"}
+        </button>
+      </div>
+
       {/* Student KPI Summary Cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-2xl border border-slate-200 bg-white p-5">
@@ -274,7 +394,7 @@ export default function StudentAttendancePanel({
                 Attendance Sessions
               </h3>
               <p className="text-xs text-slate-500">
-                Select an active session to verify your GPS position and mark attendance.
+                Step 1 checks GPS boundary; Step 2 verifies your Face ID.
               </p>
             </div>
             <button
@@ -351,7 +471,7 @@ export default function StudentAttendancePanel({
                           className="rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
                         >
                           {markingId === s.id
-                            ? "Verifying GPS..."
+                            ? "Checking Location..."
                             : "Mark Attendance"}
                         </button>
                         <button
@@ -443,7 +563,7 @@ export default function StudentAttendancePanel({
               My Verified Attendance History ({records.length})
             </h3>
             <p className="mt-1 text-xs text-slate-500">
-              Complete log of your geo-tagged attendance records.
+              Complete log of your geo-tagged and face-verified attendance records.
             </p>
           </div>
 
@@ -465,7 +585,7 @@ export default function StudentAttendancePanel({
                 <th className="p-4">Session</th>
                 <th className="p-4">Location</th>
                 <th className="p-4">Distance</th>
-                <th className="p-4">GPS Coordinates</th>
+                <th className="p-4">Face Check</th>
                 <th className="p-4">Status</th>
                 <th className="p-4">Verified At</th>
               </tr>
@@ -488,8 +608,14 @@ export default function StudentAttendancePanel({
                       </span>
                     )}
                   </td>
-                  <td className="p-4 font-mono text-xs text-slate-500">
-                    {Number(r.latitude).toFixed(5)}, {Number(r.longitude).toFixed(5)}
+                  <td className="p-4 text-xs">
+                    {r.face_verified ? (
+                      <span className="rounded-full bg-blue-50 px-2.5 py-1 font-semibold text-blue-700">
+                        Face Verified
+                      </span>
+                    ) : (
+                      <span className="text-slate-400">—</span>
+                    )}
                   </td>
                   <td className="p-4">
                     <span
@@ -519,6 +645,27 @@ export default function StudentAttendancePanel({
           </table>
         </div>
       </div>
+
+      {/* Modal 1: Register / Update Face ID */}
+      <FaceCaptureModal
+        isOpen={faceRegisterModalOpen}
+        mode="register"
+        onClose={() => setFaceRegisterModalOpen(false)}
+        onCapture={handleSaveFaceRegistration}
+      />
+
+      {/* Modal 2: Verify Face after passing Location Check */}
+      <FaceCaptureModal
+        isOpen={Boolean(faceVerifyContext)}
+        mode="verify"
+        subtitle={
+          faceVerifyContext
+            ? `Location verified (${faceVerifyContext.verification.distance_meters}m from ${faceVerifyContext.session.location?.name}). Scan your face to mark attendance.`
+            : ""
+        }
+        onClose={() => setFaceVerifyContext(null)}
+        onCapture={handleCompleteFaceVerification}
+      />
     </div>
   );
 }

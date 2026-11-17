@@ -6,7 +6,15 @@ import { supabase } from "../lib/supabase";
 
 import { useAuth } from "../context/AuthContext";
 
-import { Navigation, Building2, UserCheck } from "lucide-react";
+import {
+  Navigation,
+  Building2,
+  UserCheck,
+  ScanFace,
+  CheckCircle2
+} from "lucide-react";
+
+import FaceCaptureModal from "../components/FaceCaptureModal";
 
 
 export default function Register() {
@@ -26,6 +34,10 @@ export default function Register() {
   const [institutionCode, setInstitutionCode] = useState("");
 
   const [password, setPassword] = useState("");
+
+  const [faceDescriptor, setFaceDescriptor] = useState(null);
+
+  const [faceModalOpen, setFaceModalOpen] = useState(false);
 
   const [error, setError] = useState("");
 
@@ -93,7 +105,9 @@ export default function Register() {
             institution_name:
               accountType === "admin" ? cleanInstName : "",
 
-            institution_code: cleanCode
+            institution_code: cleanCode,
+
+            ...(faceDescriptor ? { face_descriptor: faceDescriptor } : {})
 
           }
 
@@ -296,6 +310,52 @@ export default function Register() {
           </div>
 
 
+          {accountType === "student" && (
+
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3.5">
+
+              <div className="flex items-center justify-between gap-3">
+
+                <div>
+                  <p className="text-xs font-semibold text-slate-800">
+                    Facial Data (Required for Attendance)
+                  </p>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    {faceDescriptor
+                      ? "Face ID captured and ready to save."
+                      : "Scan your face now or after signing in."}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setFaceModalOpen(true)}
+                  className={`flex shrink-0 items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition ${
+                    faceDescriptor
+                      ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                      : "bg-blue-600 text-white hover:bg-blue-700"
+                  }`}
+                >
+                  {faceDescriptor ? (
+                    <>
+                      <CheckCircle2 size={14} />
+                      Captured
+                    </>
+                  ) : (
+                    <>
+                      <ScanFace size={14} />
+                      Add Face ID
+                    </>
+                  )}
+                </button>
+
+              </div>
+
+            </div>
+
+          )}
+
+
           {error && (
 
             <p className="rounded-xl bg-red-50 p-3 text-sm text-red-600">
@@ -344,6 +404,16 @@ export default function Register() {
         </p>
 
       </div>
+
+      <FaceCaptureModal
+        isOpen={faceModalOpen}
+        mode="register"
+        onClose={() => setFaceModalOpen(false)}
+        onCapture={async (descriptor) => {
+          setFaceDescriptor(descriptor);
+          setFaceModalOpen(false);
+        }}
+      />
 
     </div>
 
